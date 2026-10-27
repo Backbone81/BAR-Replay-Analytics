@@ -1,0 +1,2 @@
+# Lua files are checked out with CRLF, as in Beyond All Reason (StyLua formats them that way).
+*.lua text eol=crlf
