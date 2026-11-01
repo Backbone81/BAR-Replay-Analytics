@@ -60,21 +60,23 @@ A playback changes the data dir like watching a replay in the client does: BAR s
 One JSON object, with one event per line:
 
 ```
-{"events": [...], "game": {...}, "teams": [...], "unitDefs": {"<unitDefID>": {...}}, "end": {"frame": ..., "reason": ...}}
+{"events": [...], "game": {...}, "teams": [...], "teamStats": {"<teamID>": [...]}, "unitDefs": {"<unitDefID>": {...}},
+ "end": {"frame": ..., "reason": ...}}
 ```
 
 Each event holds its `frame` (30 per second) and its fields under one key, the event's name: `{"frame": 0,
 "unitFinished": {"unitID": 2858, "unitDefID": 101, "unitTeam": 0}}`. Events are named after the call-in or `Spring`
 function they come from, in lower camel case (`unitCreated` is `widget:UnitCreated`), and so are their fields
 (`unitTeam`, `attackerDefID`, `currentLevel`). Unit types are given by `unitDefID`, positions as `x` and `z` in elmos,
-rounded down. Fields without a value are left out.
+rounded down. Fields without a value are left out. All events come from call-ins, nothing is sampled.
 
-What does not change during the game is written once, after the events:
+What does not change during the game, or the engine already records, is written once, after the events:
 
 | Key | Fields |
 | --- | --- |
 | `game` | `mapName`, `mapSizeX`, `mapSizeZ` (in elmos), `gameName`, `gameVersion`, `maxUnits` (`Game.maxUnits`) |
 | `teams` | list of `teamID`, `allyTeam`, `isAI`, `side` (as `Spring.GetTeamInfo`), `startUnit` (the commander's `unitDefID`: BAR's team rules param `startUnit`, which also tells the faction of a `random` side), `name` |
+| `teamStats` | every team's statistics history by `teamID`, as `Spring.GetTeamStatsHistory` returns it: an entry every 15 s with `time`, `frame` and the totals since the start of the game (`metalProduced`, `metalUsed`, `metalExcess`, `metalSent`, `metalReceived`, the same for energy, `damageDealt`, `damageReceived`, `unitsProduced`, `unitsDied`, `unitsKilled`, `unitsSent`, `unitsReceived`, `unitsCaptured`, `unitsOutCaptured`) |
 | `unitDefs` | the unit defs the events and teams refer to, by `unitDefID`, with these fields of `UnitDefs`: `name`, `translatedHumanName`, `metalCost`, `energyCost`, `buildTime`, `isFactory`, `isBuilder`, `canMove`, `buildDistance`, `canResurrect`, `extractsMetal`, `energyMake`, `windGenerator`, `maxWeaponRange`, `customParams` (`techlevel`, `unitgroup`, `iscommander`, as strings) |
 
 `end` is written when the widget stops logging. Its `reason` is `gameover` if the game ended, otherwise `stalled` (the
@@ -87,8 +89,10 @@ was stopped.
 | `unitFinished` | a unit is finished | `unitID`, `unitDefID`, `unitTeam` |
 | `unitDestroyed` | a unit dies | `unitID`, `unitDefID`, `unitTeam`, `x`, `z`, `buildProgress`, `attackerID`, `attackerDefID`, `attackerTeam`, `weaponDefID` (negative: `Game.envDamageTypes`, e.g. `SelfD`) |
 | `unitGiven` | a unit changes team | `unitID`, `unitDefID`, `newTeam`, `oldTeam` |
-| `teamResources` | every 5 s per team | `teamID`, `metal` and `energy`, each with the first values of `Spring.GetTeamResources`: `currentLevel`, `storage`, `pull`, `income`, `expense` |
-| `builderState` | a commander's, constructor's, nano turret's or factory's state changes (sampled every 0.5 s) | `unitID`, `state` (`working`, `busy`: has orders but no work yet, mostly walking, or `idle`: no orders), `cmdID` and `targetID` (of `Spring.GetUnitWorkerTask` while working: a build is `-unitDefID`, a feature target is `featureID + Game.maxUnits`) |
+| `unitIdle` | a commander's, constructor's or factory's queue ran empty, or it is finished or given without orders | `unitID`, `unitDefID`, `unitTeam` |
+| `unitCommand` | a commander, constructor or factory is given a command (also states, stop, remove: not every command enters the queue) | `unitID`, `unitDefID`, `unitTeam`, `cmdID` (a build is `-unitDefID`), `cmdParams`, `cmdOpts` (`CommandOptions.coded`), `playerID`, `fromSynced`, `fromLua` |
+| `unitCmdDone` | a commander, constructor or factory finished a command | `unitID`, `unitDefID`, `unitTeam`, `cmdID`, `cmdParams` |
+| `teamDied` | a team died (resigned, left or wiped out); BAR then removes its units | `teamID` |
 | `gameOver` | the game ends | `winningAllyTeams` |
 
 ## Development

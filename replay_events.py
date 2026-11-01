@@ -23,7 +23,6 @@ import json
 import math
 import sys
 from collections import Counter
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from itertools import pairwise
 from pathlib import Path
@@ -37,11 +36,15 @@ EVENTS_SUFFIX = "_events.json"
 GAME_SPEED = 30  # frames per second of game time (GAME_SPEED in the engine, Game.gameSpeed in Lua)
 
 # Engine command IDs (rts/Sim/Units/CommandAI/Command.h, CMD in Lua) a builder works on other than building a unit.
-CMD_NAMES = {40: "repair", 90: "reclaim", 110: "restore", 125: "resurrect", 130: "capture"}
-
-# A player who quits or resigns loses all units within seconds, with no attacker.
-QUIT_MIN_UNITS = 20
-QUIT_WINDOW_FRAMES = 60 * GAME_SPEED
+CMD_GUARD = 25
+CMD_REPAIR = 40
+CMD_NAMES = {CMD_REPAIR: "repair", 90: "reclaim", 110: "restore", 125: "resurrect", 130: "capture"}
+# Commands that do not enter the command queue, so they do not end a unit's idle time (CCommandAI::GiveAllowedCommand):
+# stop, remove, wait, the group commands and the states (fire, move, repeat, on/off, cloak ...). Command IDs above
+# CMD_FAILED are the game's own, handled by its gadgets.
+QUEUE_FREE_COMMANDS = {0, 2, 5, 35, 36, 37, 45, 50, 55, 65, 85, 95, 100, 115, 120, 135, 145}
+CMD_FAILED = 150
+RIGHT_MOUSE_KEY = 16  # option bit (CMD.OPT_RIGHT); with a build command on a factory: remove it from the queue
 
 # Output is one "label: value" per line, and right-aligned tables with the time windows first, as in sdfz_stats.py.
 FIELD_WIDTH = len("length: ")
@@ -95,8 +98,9 @@ class Game:
     game_type: str
     events: list[Event]
     event_count: int  # events in the events file, as play_replay.py counts them
-    end_frame: int  # of the last event, or of the first quit after drop_quit_losses
+    end_frame: int  # of the last event, or when the first allyteam died after drop_quit_losses
     team_labels: dict[int, dict[str, str]]  # teamID -> sdfz_stats.team_labels of the replay; empty without it
+    team_stats: dict[int, list[dict[str, float]]]  # teamID -> Spring.GetTeamStatsHistory, an entry every 15 s
     by_type: dict[str, list[Event]] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -204,90 +208,43 @@ def convert_unit_def(unit_def: dict[str, Any]) -> UnitDef:
 class EventConverter:
     """Converts the events of the events file, in order, to the events this script works with.
 
-    Those name unit types by UnitDef name and teams by teamID, as the widget wrote them before 2026-11-01. Builder
-    states of factories become "factoryState" events. "teamResources" become "resources" events with the number of
-    idle builders (finished commanders and constructors without orders) and idle factories (finished, not building) at
-    that frame, from the latest builder states.
+    Those name unit types by UnitDef name and teams by teamID, as the widget wrote them before 2026-11-01.
     """
 
     def __init__(self, unit_defs: dict[int, UnitDef]) -> None:
         self.unit_defs = unit_defs
         self.unit_def_ids: dict[int, int] = {}  # unitID -> unitDefID
-        self.unit_teams: dict[int, int] = {}  # unitID -> teamID
-        self.finished: set[int] = set()  # unitIDs of finished units alive
-        self.states: dict[int, str] = {}  # unitID -> latest builder state
 
     def def_name(self, unit_def_id: int | None) -> str | None:
         return self.unit_defs[unit_def_id]["name"] if unit_def_id in self.unit_defs else None
 
-    def unit_def_of(self, unit_id: int) -> UnitDef:
-        return self.unit_defs.get(self.unit_def_ids.get(unit_id, -1), {})
-
-    def idle_count(self, team_id: int, is_counted: Callable[[UnitDef, str | None], bool]) -> int:
-        return sum(
-            1
-            for unit_id in self.finished
-            if self.unit_teams.get(unit_id) == team_id
-            and is_counted(self.unit_def_of(unit_id), self.states.get(unit_id))
-        )
-
     def convert(self, event: Event) -> Event:
         """Return the event as this script uses it."""
-        name, frame = event["event"], event["frame"]
-        converted: Event = {"event": name, "frame": frame}
+        name = event["event"]
+        converted: Event = {"event": name, "frame": event["frame"]}
         if "x" in event and "z" in event:
             converted["position"] = [event["x"], event["z"]]
-        if name in ("unitCreated", "unitFinished", "unitDestroyed", "unitGiven"):
-            unit_id = event["unitID"]
-            converted |= {"unitID": unit_id, "unitDef": self.def_name(event["unitDefID"])}
-            converted["teamID"] = event["newTeam"] if name == "unitGiven" else event["unitTeam"]
+        if "unitDefID" in event:
+            converted |= {"unitID": event["unitID"], "unitDef": self.def_name(event["unitDefID"])}
+        if "unitTeam" in event:
+            converted["teamID"] = event["unitTeam"]
+        for key in ("cmdID", "cmdParams", "cmdOpts", "teamID"):
+            if key in event:
+                converted[key] = event[key]
         if name == "unitCreated":
-            self.unit_def_ids[unit_id] = event["unitDefID"]
-            self.unit_teams[unit_id] = event["unitTeam"]
+            self.unit_def_ids[event["unitID"]] = event["unitDefID"]
             if event.get("builderID") is not None:
                 converted["builderID"] = event["builderID"]
                 if builder_def := self.def_name(self.unit_def_ids.get(event["builderID"])):
                     converted["builderDef"] = builder_def
-        elif name == "unitFinished":
-            self.finished.add(unit_id)
         elif name == "unitDestroyed":
             converted["buildProgress"] = event.get("buildProgress")
             if event.get("attackerDefID") is not None:
                 converted["attackerDef"] = self.def_name(event["attackerDefID"])
             if event.get("attackerTeam") is not None:
                 converted["attackerTeamID"] = event["attackerTeam"]
-            self.finished.discard(unit_id)
-            self.states.pop(unit_id, None)
         elif name == "unitGiven":
-            converted["oldTeamID"] = event["oldTeam"]
-            self.unit_teams[unit_id] = event["newTeam"]
-            self.states.pop(unit_id, None)
-        elif name == "builderState":
-            unit_id = event["unitID"]
-            self.states[unit_id] = event["state"]
-            converted |= {"unitID": unit_id, "state": event["state"]}
-            if self.unit_def_of(unit_id).get("isFactory"):
-                converted["event"] = "factoryState"
-            for key, old_key in (("cmdID", "command"), ("targetID", "targetID")):
-                if event.get(key) is not None:
-                    converted[old_key] = event[key]
-        elif name == "teamResources":
-            team_id = event["teamID"]
-            converted["event"] = "resources"
-            converted["teamID"] = team_id
-            for resource in ("metal", "energy"):
-                values = event[resource]
-                converted[resource] = {
-                    "current": values["currentLevel"],
-                    **{key: values[key] for key in ("storage", "pull", "income", "expense")},
-                }
-            converted["idleBuilderCount"] = self.idle_count(
-                team_id,
-                lambda unit_def, state: unit_def.get("isBuilder") and unit_def.get("isMobile") and state == "idle",
-            )
-            converted["idleFactoryCount"] = self.idle_count(
-                team_id, lambda unit_def, state: unit_def.get("isFactory") and state != "working"
-            )
+            converted |= {"teamID": event["newTeam"], "oldTeamID": event["oldTeam"]}
         elif name == "gameOver":
             converted["winningAllyTeamIDs"] = event["winningAllyTeams"]
         return converted
@@ -321,6 +278,7 @@ def load(path: Path, team_labels: dict[int, dict[str, str]]) -> Game:
         }
         for team in document["teams"]
     }
+    team_stats = {int(team_id): history for team_id, history in document["teamStats"].items()}
     game_setup = document["game"]
     end_frame = max((event["frame"] for event in events), default=0)
     map_size = (game_setup["mapSizeX"], game_setup["mapSizeZ"])
@@ -335,40 +293,42 @@ def load(path: Path, team_labels: dict[int, dict[str, str]]) -> Game:
         len(document["events"]),
         end_frame,
         team_labels,
+        team_stats,
     )
 
 
 def find_quits(game: Game) -> dict[int, tuple[int, int]]:
-    """Return {teamID: (frame, units)} of teams that quit or resigned: a burst of deaths without attacker at the end."""
-    quits = {}
-    for team_id in game.teams:
-        burst = [
-            event["frame"]
-            for event in game.of_type("unitDestroyed")
-            if event["teamID"] == team_id
-            and event.get("attackerTeamID") is None
-            and event["frame"] > game.end_frame - QUIT_WINDOW_FRAMES
-        ]
-        if len(burst) >= QUIT_MIN_UNITS:
-            quits[team_id] = (min(burst), len(burst))
-    return quits
+    """Return {teamID: (frame, units)} of the teams that died (TeamDied: resigned, quit or wiped out) and how many of
+    their units died from then on: BAR removes a dead team's units (game_team_death_effect.lua), they are no losses."""
+    died = {event["teamID"]: event["frame"] for event in game.of_type("teamDied")}
+    removed = Counter(
+        event["teamID"]
+        for event in game.of_type("unitDestroyed")
+        if event["frame"] >= died.get(event["teamID"], math.inf)
+    )
+    return {team_id: (frame, removed[team_id]) for team_id, frame in died.items()}
 
 
 def drop_quit_losses(game: Game, quits: dict[int, tuple[int, int]]) -> Game:
-    """Return the game without the quit bursts' deaths, ending at the first quit."""
+    """Return the game without the units removed from dead teams, ending when the first allyteam had died."""
     if not quits:
         return game
-    quit_frames = {team_id: frame for team_id, (frame, _) in quits.items()}
+    died = {team_id: frame for team_id, (frame, _) in quits.items()}
     events = [
         event
         for event in game.events
-        if not (
-            event["event"] == "unitDestroyed"
-            and event.get("attackerTeamID") is None
-            and event["frame"] >= quit_frames.get(event["teamID"], math.inf)
-        )
+        if not (event["event"] == "unitDestroyed" and event["frame"] >= died.get(event["teamID"], math.inf))
     ]
-    return dataclasses.replace(game, events=events, end_frame=min(quit_frames.values()))
+    ally_teams = collections.defaultdict(list)
+    for team_id, team in game.teams.items():
+        ally_teams[team["allyTeamID"]].append(team_id)
+    dead_ally_frames = [
+        max(died[team_id] for team_id in team_ids)
+        for team_ids in ally_teams.values()
+        if all(team_id in died for team_id in team_ids)
+    ]
+    end_frame = min(dead_ally_frames, default=game.end_frame)
+    return dataclasses.replace(game, events=events, end_frame=end_frame)
 
 
 # Units and formatting
@@ -476,7 +436,7 @@ def print_header(game: Game, replay_file: Path | None, length_frame: int, quits:
     for team_id in game.teams:
         print(f"  {game.team_title(team_id)}")
     for team_id, (frame, units) in quits.items():
-        print_field("quit", f"team {team_id} at {mmss(frame)}, {units} units removed without attacker (not losses)")
+        print_field("died", f"team {team_id} at {mmss(frame)}, {units} units removed after it (not losses)")
 
 
 # Build order and milestones
@@ -618,26 +578,74 @@ def alive_at_window_ends(game: Game, windows: Windows) -> dict[int, list[Counter
     return snapshots
 
 
-def print_timeline(game: Game, team_id: int, windows: Windows, alive: list[Counter[str]]) -> None:
-    """Finished units alive by role and army metal at each window's end, and resources averaged over the window.
+def stat_at(history: list[dict[str, float]], key: str, frame: int) -> float:
+    """Return a total of the team statistics history at frame, interpolated between its entries (every 15 s)."""
+    frames = [entry["frame"] for entry in history]
+    index = bisect.bisect_right(frames, frame)
+    if index == 0:
+        return history[0][key] if history else 0.0
+    if index == len(history):
+        return history[-1][key]
+    before, after = history[index - 1], history[index]
+    share = (frame - before["frame"]) / max(after["frame"] - before["frame"], 1)
+    return before[key] + share * (after[key] - before[key])
 
-    The resources are the widget's "resources" events (every 5 s): metal and energy income, idle builders (commanders
-    and constructors without orders) and factories, and how often energy stalled: the storage nearly empty while the
-    pull (what the team wants to spend) exceeds the income.
+
+def overlap(intervals: list[tuple[int, int]], begin: int, end: int) -> int:
+    """Return how many frames of [begin, end) the intervals cover."""
+    return sum(max(0, min(stop, end) - max(start, begin)) for start, stop in intervals)
+
+
+def factory_idle_intervals(game: Game, team_id: int) -> list[tuple[int, int]]:
+    """Return when the team's finished factories were not building: from unitCreated of a unit they started until it
+    was finished or died, a factory builds."""
+    created = {event["unitID"]: event for event in game.of_type("unitCreated")}
+    finished_frames = {event["unitID"]: event["frame"] for event in game.of_type("unitFinished")}
+    gone_frames = {
+        event["unitID"]: event["frame"] for event in game.of_type("unitDestroyed") + game.of_type("unitGiven")
+    }
+    building = collections.defaultdict(list)  # factory unitID -> [(start, end)] of its builds
+    for event in game.of_type("unitCreated"):
+        if event.get("builderID") is not None:
+            end = min(finished_frames.get(event["unitID"], math.inf), gone_frames.get(event["unitID"], math.inf))
+            building[event["builderID"]].append((event["frame"], min(end, game.end_frame)))
+    intervals = []
+    for unit_id, event in created.items():
+        if event["teamID"] != team_id or not game.unit_def(event["unitDef"]).get("isFactory"):
+            continue
+        if unit_id not in finished_frames:
+            continue
+        begin, stop = finished_frames[unit_id], min(gone_frames.get(unit_id, game.end_frame), game.end_frame)
+        for build_start, build_end in sorted(building[unit_id]):
+            if build_start > begin:
+                intervals.append((begin, min(build_start, stop)))
+            begin = max(begin, build_end)
+        if stop > begin:
+            intervals.append((begin, stop))
+    return [(begin, end) for begin, end in intervals if end > begin]
+
+
+def print_timeline(
+    game: Game, team_id: int, windows: Windows, alive: list[Counter[str]], activities: "list[BuilderActivity]"
+) -> None:
+    """Finished units alive by role and army metal at each window's end, income and idle builders over the window.
+
+    Income is metal and energy produced per second, from the team statistics history (every 15 s). Idle builders and
+    factories are how many of the team's commanders and constructors were idle (no orders) and its factories were
+    not building, on average over the window.
     """
-    resources: list[list[Event]] = [[] for _ in range(len(windows))]
-    for event in game.of_type("resources"):
-        if event["teamID"] == team_id:
-            resources[windows.index(event["frame"])].append(event)
+    history = game.team_stats.get(team_id, [])
+    builder_idle = [interval for activity in activities for interval in activity.idle_intervals]
+    factory_idle = factory_idle_intervals(game, team_id)
 
     columns = [column for _, column, _ in ROLE_COLUMNS]
-    columns += ["armyMetal", "m/s", "e/s", "idleBuilders", "idleFactories", "eStall"]
-    widths = [width for _, _, width in ROLE_COLUMNS] + [9, 6, 6, 12, 13, 6]
-    print_heading("timeline (units alive at the end of each window; resources averaged over it):")
+    columns += ["armyMetal", "m/s", "e/s", "idleBuilders", "idleFactories"]
+    widths = [width for _, _, width in ROLE_COLUMNS] + [9, 6, 6, 12, 13]
+    print_heading("timeline (units alive at the end of each window; income and idle builders over it):")
     print_row("time", columns, widths)
-    for index, (counts, rows) in enumerate(zip(alive, resources, strict=True)):
-        if not rows:
-            continue
+    for index, counts in enumerate(alive):
+        begin, end = windows.bounds[index]
+        length = max(end - begin, 1)
         roles = Counter()
         army_metal = 0
         for def_name, count in counts.items():
@@ -646,21 +654,16 @@ def print_timeline(game: Game, team_id: int, windows: Windows, alive: list[Count
             if role(unit_def) == "army":
                 army_metal += count * unit_def.get("metalCost", 0)
 
-        def average(value: Callable[[Event], float], rows: list[Event] = rows) -> float:
-            return sum(value(row) for row in rows) / len(rows)
-
-        def is_energy_stalled(row: Event) -> bool:
-            energy = row["energy"]
-            return energy["current"] < 0.05 * max(energy["storage"], 1) and energy["pull"] > energy["income"]
+        def income(key: str, begin: int = begin, end: int = end, length: int = length) -> float:
+            return (stat_at(history, key, end) - stat_at(history, key, begin)) / (length / GAME_SPEED)
 
         cells = [roles[unit_role] for unit_role, _, _ in ROLE_COLUMNS]
         cells += [
             f"{army_metal:.0f}",
-            f"{average(lambda row: row['metal']['income']):.1f}",
-            f"{average(lambda row: row['energy']['income']):.0f}",
-            f"{average(lambda row: row['idleBuilderCount']):.1f}",
-            f"{average(lambda row: row['idleFactoryCount']):.1f}",
-            percent(average(is_energy_stalled), 1),
+            f"{income('metalProduced'):.1f}",
+            f"{income('energyProduced'):.0f}",
+            f"{overlap(builder_idle, begin, end) / length:.1f}",
+            f"{overlap(factory_idle, begin, end) / length:.1f}",
         ]
         print_row(windows.label(index), cells, widths)
 
@@ -670,10 +673,13 @@ def print_timeline(game: Game, team_id: int, windows: Windows, alive: list[Count
 
 @dataclass
 class BuilderActivity:
-    """What one commander, constructor or nano did from when it was finished until it died or the game ended.
+    """What one commander or constructor was ordered to do from when it was finished until it died, was given away or
+    the game ended, from the command call-ins.
 
-    The states are the widget's "builderState" events: working (building, assisting, repairing, reclaiming ...),
-    busy (has orders but no work yet, mostly walking) or idle (no orders).
+    It is idle from unitIdle (its queue ran empty, or it was finished without orders) until the next order that enters
+    the queue (unitCommand), busy otherwise. Each stretch of busy time counts for the order it was on: the one that
+    was done at its end (unitCmdDone), or the one a new order without shift replaced. That is assisting (guard, or
+    repair of another builder's unit still being built), repair, reclaim, resurrect ...
     """
 
     unit_id: int
@@ -683,26 +689,40 @@ class BuilderActivity:
     stop: int
     started: list[Event]  # "unitCreated" events of the units it started
     resurrected: list[Event]  # "unitCreated" events of the units it resurrected
-    state_frames: Counter[str] = field(default_factory=Counter)  # state -> frames
+    state_frames: Counter[str] = field(default_factory=Counter)  # "idle" or "busy" -> frames
     assisted: Counter[str] = field(default_factory=Counter)  # UnitDef name of another builder's build -> frames
     tasks: Counter[str] = field(default_factory=Counter)  # CMD_NAMES name -> frames
-    idle_stretches: list[tuple[int, int]] = field(default_factory=list)  # (first frame, end frame)
+    idle_intervals: list[tuple[int, int]] = field(default_factory=list)  # (first frame, end frame)
+    idle_stretches: list[tuple[int, int]] = field(default_factory=list)  # the idle intervals of idle_seconds+
 
     @property
     def life(self) -> int:
         return self.stop - self.start
 
 
+SHIFT_KEY = 32  # option bit (CMD.OPT_SHIFT): queue the command after the current ones
+
+
+def is_queued_order(event: Event) -> bool:
+    """Return whether a unitCommand enters the command queue: an order, not a state, stop or the game's own command."""
+    cmd_id = event["cmdID"]
+    if cmd_id < 0:
+        return not event.get("cmdOpts", 0) & RIGHT_MOUSE_KEY
+    return cmd_id not in QUEUE_FREE_COMMANDS and cmd_id <= CMD_FAILED
+
+
 def builder_activities(game: Game, team_id: int, idle_seconds: int) -> list[BuilderActivity]:
-    """Return the team's builders' activities, in the order they were finished; idle stretches of idle_seconds+."""
+    """Return the team's commanders' and constructors' activities, in the order they were finished; idle stretches of
+    idle_seconds+."""
     created = {event["unitID"]: event for event in game.of_type("unitCreated")}
     finished_frames = {event["unitID"]: event["frame"] for event in game.of_type("unitFinished")}
     gone_frames = {
         event["unitID"]: event["frame"] for event in game.of_type("unitDestroyed") + game.of_type("unitGiven")
     }
-    states = collections.defaultdict(list)
-    for event in game.of_type("builderState"):
-        states[event["unitID"]].append(event)
+    commands = collections.defaultdict(list)
+    for event in game.events:
+        if event["event"] in ("unitIdle", "unitCommand", "unitCmdDone"):
+            commands[event["unitID"]].append(event)
     resurrected = resurrected_ids(game)
     started, resurrected_by = collections.defaultdict(list), collections.defaultdict(list)
     for event in game.of_type("unitCreated"):
@@ -711,44 +731,100 @@ def builder_activities(game: Game, team_id: int, idle_seconds: int) -> list[Buil
             by[event["builderID"]].append(event)
 
     activities = []
-    unit_ids = [unit_id for unit_id in states if created.get(unit_id, {}).get("teamID") == team_id]
-    for unit_id in sorted(unit_ids, key=lambda unit_id: finished_frames.get(unit_id, 0)):
+    unit_ids = [
+        unit_id
+        for unit_id, event in created.items()
+        if event["teamID"] == team_id
+        and unit_id in finished_frames
+        and game.unit_def(event["unitDef"]).get("isBuilder")
+        and game.unit_def(event["unitDef"]).get("isMobile")
+    ]
+    for unit_id in sorted(unit_ids, key=lambda unit_id: finished_frames[unit_id]):
         def_name = created[unit_id]["unitDef"]
         activity = BuilderActivity(
             unit_id,
             def_name,
             role(game.unit_def(def_name)),
-            start=finished_frames.get(unit_id, 0),
+            start=finished_frames[unit_id],
             stop=min(gone_frames.get(unit_id, game.end_frame), game.end_frame),
             started=started[unit_id],
             resurrected=resurrected_by[unit_id],
         )
         if activity.life <= 0:
             continue
-        for current, following in pairwise([*states[unit_id], {"frame": activity.stop}]):
-            begin, end = max(current["frame"], activity.start), min(following["frame"], activity.stop)
-            if end <= begin:
-                continue
-            activity.state_frames[current["state"]] += end - begin
-            if current["state"] == "idle" and end - begin >= idle_seconds * GAME_SPEED:
-                activity.idle_stretches.append((begin, end))
-            if current["state"] != "working":
-                continue
-            command = current.get("command", 0)  # negative: building that UnitDef
-            if command >= 0:
-                activity.tasks[CMD_NAMES.get(command, f"command {command}")] += end - begin
-            elif (target := created.get(current.get("targetID"), {})).get("builderID") != unit_id:
-                activity.assisted[target.get("unitDef", "?")] += end - begin
+        follow_orders(activity, commands[unit_id], created, finished_frames, idle_seconds)
         activities.append(activity)
     return activities
 
 
+def follow_orders(
+    activity: BuilderActivity,
+    commands: list[Event],
+    created: dict[int, Event],
+    finished_frames: dict[int, int],
+    idle_seconds: int,
+) -> None:
+    """Fill the activity's states and tasks from its unitIdle, unitCommand and unitCmdDone events."""
+
+    def account(state: str, begin: int, end: int) -> None:
+        begin, end = max(begin, activity.start), min(end, activity.stop)
+        if end <= begin:
+            return
+        activity.state_frames[state] += end - begin
+        if state == "idle":
+            activity.idle_intervals.append((begin, end))
+            if end - begin >= idle_seconds * GAME_SPEED:
+                activity.idle_stretches.append((begin, end))
+
+    def attribute(begin: int, end: int, order: Event | None) -> None:
+        frames = min(end, activity.stop) - max(begin, activity.start)
+        if frames <= 0 or order is None:
+            return
+        cmd_id, params = order["cmdID"], order.get("cmdParams", [])
+        if cmd_id in (CMD_GUARD, CMD_REPAIR) and len(params) == 1 and (target := created.get(int(params[0]))):
+            is_nanoframe = target["frame"] <= begin < finished_frames.get(target["unitID"], math.inf)
+            if (cmd_id == CMD_GUARD or is_nanoframe) and target.get("builderID") != activity.unit_id:
+                activity.assisted[target["unitDef"]] += frames
+                return
+        if cmd_id in CMD_NAMES:
+            activity.tasks[CMD_NAMES[cmd_id]] += frames
+
+    # Busy until the first unitIdle: the widget writes one when a unit is finished without orders. current is the
+    # order the unit is on, as far as known: None after one was done, until the next one starts a new queue.
+    state, state_since, task_since = "busy", activity.start, activity.start
+    current: Event | None = None
+    for event in commands:
+        frame = event["frame"]
+        if frame > activity.stop:
+            break
+        new_state = state
+        if event["event"] == "unitIdle":
+            new_state, current = "idle", None
+        elif event["event"] == "unitCommand" and is_queued_order(event):
+            new_state = "busy"
+            if state == "idle" or not event.get("cmdOpts", 0) & SHIFT_KEY:
+                if state == "busy":
+                    attribute(task_since, frame, current)
+                task_since, current = frame, event
+        elif event["event"] == "unitCmdDone":
+            if state == "busy":
+                attribute(task_since, frame, event)
+            task_since, current = frame, None
+        if new_state != state:
+            account(state, state_since, frame)
+            state, state_since = new_state, frame
+            task_since = frame
+    account(state, state_since, activity.stop)
+    if state == "busy":
+        attribute(task_since, activity.stop, current)
+
+
 def print_builder_totals(activities: list[BuilderActivity]) -> None:
     """One row per role: how many, the share of their time per state, and unit-minutes idle, assisting and on tasks."""
-    columns = ["units", "work", "busy", "idle", "idleMin", "assistMin", "repairMin", "reclaimMin"]
+    columns = ["units", "busy", "idle", "idleMin", "assistMin", "repairMin", "reclaimMin"]
     widths = [max(len(column), 6) for column in columns]
     print_row("role", columns, widths)
-    for unit_role in ("commander", "constructor", "nano"):
+    for unit_role in ("commander", "constructor"):
         group = [activity for activity in activities if activity.role == unit_role]
         if not group:
             continue
@@ -758,7 +834,6 @@ def print_builder_totals(activities: list[BuilderActivity]) -> None:
         assisted = sum(sum(activity.assisted.values()) for activity in group)
         cells = [
             len(group),
-            percent(states["working"], life),
             percent(states["busy"], life),
             percent(states["idle"], life),
             unit_minutes(states["idle"]),
@@ -767,27 +842,6 @@ def print_builder_totals(activities: list[BuilderActivity]) -> None:
             unit_minutes(tasks["reclaim"]),
         ]
         print_row(unit_role, cells, widths)
-
-
-def nano_position(game: Game, activity: BuilderActivity) -> str:
-    """Where a nano stands: "1128,2920, 380 from the nearest factory", and whether that is out of its build range."""
-    created = {event["unitID"]: event for event in game.of_type("unitCreated")}
-    nano = created[activity.unit_id]
-    factories = [
-        created[event["unitID"]]["position"]
-        for event in game.of_type("unitFinished")
-        if event["teamID"] == nano["teamID"]
-        and game.unit_def(event["unitDef"]).get("isFactory")
-        and created.get(event["unitID"], {}).get("position")
-    ]
-    if not nano.get("position") or not factories:
-        return ""
-    x, z = nano["position"]
-    distance = min(math.dist((x, z), factory) for factory in factories)
-    # To the factory's centre, further than to its edge, which is what the build range is measured to.
-    build_distance = game.unit_def(activity.def_name).get("buildDistance")
-    out_of_range = f", out of build range {build_distance:.0f}" if build_distance and distance > build_distance else ""
-    return f"{x:.0f},{z:.0f}, {distance:.0f} from the nearest factory{out_of_range}"
 
 
 def print_builder(game: Game, activity: BuilderActivity, number: int, idle_seconds: int) -> None:
@@ -805,9 +859,6 @@ def print_builder(game: Game, activity: BuilderActivity, number: int, idle_secon
             print(f"    {item}")
 
     field("alive", f"{mmss(activity.start)}-{mmss(activity.stop)}")
-    if activity.role == "nano" and (position := nano_position(game, activity)):
-        field("at", position)
-    field("work", percent(states["working"], life))
     field("busy", percent(states["busy"], life))
     field("idle", percent(states["idle"], life))
     if activity.idle_stretches:
@@ -834,25 +885,18 @@ def print_builder(game: Game, activity: BuilderActivity, number: int, idle_secon
             )
 
 
-def print_builders(game: Game, team_id: int, idle_seconds: int, nano_details: bool) -> None:
-    """Totals per role, then each commander and constructor (and nano with nano_details).
-
-    Nanos often stand behind the front as repair stations, so their idle time is no mistake; constructors are what
-    starts new buildings.
-    """
-    activities = builder_activities(game, team_id, idle_seconds)
+def print_builders(game: Game, activities: list[BuilderActivity], idle_seconds: int) -> None:
+    """Totals per role, then each commander and constructor. Nano turrets are not followed: they often stand behind
+    the front as repair stations, so their idle time is no mistake; constructors are what starts new buildings."""
     if not activities:
-        print_heading("builders: no builderState events (play the replay back again with the current widget)")
+        print_heading("builders: none")
         return
-    print_heading(
-        "builders (work: building, assisting, repairing, reclaiming; busy: has orders but no work yet, walking):"
-    )
+    print_heading("builders (busy: has orders; assisted and tasks: until the order was done):")
     print_builder_totals(activities)
     numbers = Counter()  # UnitDef name -> how many of the type so far, to number them
     for activity in activities:
         numbers[activity.def_name] += 1
-        if activity.role != "nano" or nano_details:
-            print_builder(game, activity, numbers[activity.def_name], idle_seconds)
+        print_builder(game, activity, numbers[activity.def_name], idle_seconds)
 
 
 # Losses
@@ -1005,9 +1049,6 @@ def main() -> None:
         default=15,
         help="list a builder's idle stretches of at least this many seconds (default 15)",
     )
-    parser.add_argument(
-        "--nano-details", action="store_true", help="list nano turrets one by one too (default: in the totals only)"
-    )
     args = parser.parse_args()
 
     events_file = find_events(args.events)
@@ -1024,8 +1065,9 @@ def main() -> None:
         print(f"\n\n{game.team_title(team_id)}")
         print_build_order(game, team_id, args.build_order_minutes)
         print_milestones(game, team_id)
-        print_timeline(game, team_id, windows, alive[team_id])
-        print_builders(game, team_id, args.idle_builder_seconds, args.nano_details)
+        activities = builder_activities(game, team_id, args.idle_builder_seconds)
+        print_timeline(game, team_id, windows, alive[team_id], activities)
+        print_builders(game, activities, args.idle_builder_seconds)
         print_kills(game, team_id, windows)
         print_death_grid(game, team_id, windows)
         print_trades(game, team_id, windows)

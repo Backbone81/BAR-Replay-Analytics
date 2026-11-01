@@ -16,10 +16,13 @@ end
 -- Active only in a headless replay; in a normal client, also when watching a replay, it removes itself.
 -- Writes events/<replay name>_events.json in the widget's own folder (BAR lets user widgets write only under
 -- LuaUI/Config/ and LuaUI/Widgets/), one JSON object:
---   {"events":[...],"game":{...},"teams":[...],"unitDefs":{"<unitDefID>":{...}},"end":{"frame":...,"reason":...}}
+--   {"events":[...],"game":{...},"teams":[...],"teamStats":{"<teamID>":[...]},"unitDefs":{"<unitDefID>":{...}},
+--    "end":{"frame":...,"reason":...}}
 -- Each event is {"frame":...,"<event name>":{...}}, one per line, named and with fields named after the call-in or
--- Spring function it comes from. What does not change during the game is written once, after the events: the game,
--- the teams, and the unit defs the events refer to. "end" is written when logging stops, also when the replay stalls;
+-- Spring function it comes from. All events come from call-ins, nothing is sampled. What does not change
+-- during the game is written once, after the events: the game, the teams, each team's statistics history
+-- (Spring.GetTeamStatsHistory, every 15 s) and the unit defs the events refer to. "end" is written when logging stops,
+-- also when the replay stalls;
 -- its reason is "gameover" only if the game ended. A file without it is incomplete: the engine crashed or was stopped.
 -- Switches to full view, raises the speed limit (the pre-game start position phase of a replay otherwise plays in real
 -- time), skips to the end of the replay once the game runs, and quits the engine when the game is over or the replay
@@ -29,8 +32,6 @@ end
 -- Configuration
 --------------------------------------------------------------------------------
 
-local RESOURCES_SECONDS = 5 -- "teamResources" events
-local BUILDER_SAMPLE_SECONDS = 0.5 -- "builderState" events are written on change only
 local STALL_QUIT_SECONDS = 20 -- the replay has ended when frames stop advancing
 local PREGAME_QUIT_SECONDS = 300
 
@@ -42,21 +43,18 @@ local spDiffTimers = Spring.DiffTimers
 local spEcho = Spring.Echo
 local spGetAIInfo = Spring.GetAIInfo
 local spGetFactoryCommandCount = Spring.GetFactoryCommandCount
-local spGetFactoryCommands = Spring.GetFactoryCommands
 local spGetGaiaTeamID = Spring.GetGaiaTeamID
 local spGetGameFrame = Spring.GetGameFrame
 local spGetPlayerInfo = Spring.GetPlayerInfo
 local spGetTeamInfo = Spring.GetTeamInfo
 local spGetTeamList = Spring.GetTeamList
-local spGetTeamResources = Spring.GetTeamResources
 local spGetTeamRulesParam = Spring.GetTeamRulesParam
+local spGetTeamStatsHistory = Spring.GetTeamStatsHistory
 local spGetTimer = Spring.GetTimer
 local spGetUnitCommandCount = Spring.GetUnitCommandCount
-local spGetUnitCurrentCommand = Spring.GetUnitCurrentCommand
 local spGetUnitHealth = Spring.GetUnitHealth
 local spGetUnitIsBeingBuilt = Spring.GetUnitIsBeingBuilt
 local spGetUnitPosition = Spring.GetUnitPosition
-local spGetUnitWorkerTask = Spring.GetUnitWorkerTask
 local spIsReplay = Spring.IsReplay
 local spSendCommands = Spring.SendCommands
 
@@ -65,32 +63,17 @@ local mathFloor = math.floor
 local mathHuge = math.huge
 local stringFormat = string.format
 
-local GAME_SPEED = Game.gameSpeed
-local RESOURCES_FRAMES = RESOURCES_SECONDS * GAME_SPEED
-local BUILDER_SAMPLE_FRAMES = mathFloor(BUILDER_SAMPLE_SECONDS * GAME_SPEED)
-
 -- The replay's file name without .sdfz (Spring.GetReplayFilePath() returns nil once the replay has ended).
 local EVENTS_FILE_NAME = (Game.demoPlayName or "replay") .. "_events.json"
 
 -- Unit def lookups, filled in Initialize.
 local isFactoryDef = {}
-local isBuilderDef = {} -- mobile builders: commanders and constructors
-local isNanoDef = {} -- builders that can't move
+local isBuilderDef = {} -- mobile builders: commanders and constructors; nano turrets are not followed
 
 local eventsFile -- nil while not logging
 local isFirstEvent = true
 local teamIDs = {} -- set of every team but Gaia
 local referencedUnitDefIDs = {} -- set of the unit defs the events refer to, written once at the end
-
--- unitID -> teamID
-local factories = {}
-local builders = {}
-local nanos = {}
-
--- unitID -> last logged "builderState" fields
-local builderStates = {}
-local builderCommands = {}
-local builderTargets = {}
 
 local lastFrame = -1
 local lastFrameTimer -- when the frame last advanced; nil until Initialize
@@ -235,6 +218,17 @@ local function getUnitDefs()
 	return unitDefs
 end
 
+-- Every team's statistics history by teamID, as Spring.GetTeamStatsHistory returns it: an entry every 15 s with the
+-- totals since the start of the game, the last one at the current frame.
+local function getTeamStats()
+	local teamStats = jsonObject({})
+	for teamID in pairs(teamIDs) do
+		local count = spGetTeamStatsHistory(teamID) or 0
+		teamStats[tostring(teamID)] = count > 0 and spGetTeamStatsHistory(teamID, 1, count) or {}
+	end
+	return teamStats
+end
+
 -- Closes the events array and writes what is written once. The teams come first: they refer to unit defs.
 local function closeEventsFile(reason)
 	if not eventsFile then
@@ -246,6 +240,8 @@ local function closeEventsFile(reason)
 		encodeJson(getGame()),
 		',"teams":',
 		encodeJson(teams),
+		',"teamStats":',
+		encodeJson(getTeamStats()),
 		',"unitDefs":',
 		encodeJson(getUnitDefs()),
 		',"end":',
@@ -276,8 +272,6 @@ local function classifyUnitDefs()
 			isFactoryDef[unitDefID] = true
 		elseif unitDef.isBuilder and unitDef.canMove then
 			isBuilderDef[unitDefID] = true
-		elseif unitDef.isBuilder then
-			isNanoDef[unitDefID] = true
 		end
 	end
 end
@@ -291,86 +285,25 @@ local function collectTeamIDs()
 	end
 end
 
-local function addUnit(unitID, unitDefID, teamID)
-	if isFactoryDef[unitDefID] then
-		factories[unitID] = teamID
-	elseif isBuilderDef[unitDefID] then
-		builders[unitID] = teamID
-	elseif isNanoDef[unitDefID] then
-		nanos[unitID] = teamID
-	end
-end
-
-local function removeUnit(unitID)
-	factories[unitID] = nil
-	builders[unitID] = nil
-	nanos[unitID] = nil
-	builderStates[unitID] = nil
-	builderCommands[unitID] = nil
-	builderTargets[unitID] = nil
-end
-
 --------------------------------------------------------------------------------
--- Sampling
+-- Command queues
 --------------------------------------------------------------------------------
 
--- Returns the number of commands in the unit's queue and the cmdID of the first. A factory's queue is its build queue:
--- Spring.GetUnitCommandCount gives the orders for the units it builds.
-local function getQueue(unitID, isFactory)
+-- Returns the number of commands in the unit's queue. A factory's queue is its build queue: Spring.GetUnitCommandCount
+-- gives the orders for the units it builds.
+local function getQueueCount(unitID, isFactory)
 	if isFactory then
-		local count = spGetFactoryCommandCount(unitID) or 0
-		local commands = count > 0 and spGetFactoryCommands(unitID, 1)
-		return count, commands and commands[1] and commands[1].id
+		return spGetFactoryCommandCount(unitID) or 0
 	end
-	local count = spGetUnitCommandCount(unitID) or 0
-	return count, count > 0 and spGetUnitCurrentCommand(unitID) or nil
+	return spGetUnitCommandCount(unitID) or 0
 end
 
--- Logs a "builderState" event when a finished builder's or factory's state changes: "working" (cmdID and targetID of
--- Spring.GetUnitWorkerTask: build = -unitDefID, 40 repair or assist, 90 reclaim, 125 resurrect; a feature's targetID
--- is featureID + Game.maxUnits), "busy" (orders but no worker task, e.g. walking; cmdID: the first one) or "idle" (no
--- orders).
-local function logBuilderState(unitID, isFactory)
-	if spGetUnitIsBeingBuilt(unitID) then
-		return
-	end
-	local state, cmdID, targetID
-	local taskCmdID, taskTargetID = spGetUnitWorkerTask(unitID)
-	if taskCmdID then
-		state, cmdID, targetID = "working", taskCmdID, taskTargetID
-	else
-		local count, firstCmdID = getQueue(unitID, isFactory)
-		if count > 0 then
-			state, cmdID = "busy", firstCmdID
-		else
-			state = "idle"
-		end
-	end
-	if builderStates[unitID] == state and builderCommands[unitID] == cmdID and builderTargets[unitID] == targetID then
-		return
-	end
-	builderStates[unitID] = state
-	builderCommands[unitID] = cmdID
-	builderTargets[unitID] = targetID
-	if cmdID and cmdID < 0 then
-		referenceUnitDef(-cmdID)
-	end
-	writeEvent("builderState", { unitID = unitID, state = state, cmdID = cmdID, targetID = targetID })
-end
-
--- The first five values of Spring.GetTeamResources.
-local function getTeamResource(teamID, resource)
-	local currentLevel, storage, pull, income, expense = spGetTeamResources(teamID, resource)
-	return { currentLevel = currentLevel, storage = storage, pull = pull, income = income, expense = expense }
-end
-
-local function logTeamResources()
-	for teamID in pairs(teamIDs) do
-		writeEvent("teamResources", {
-			teamID = teamID,
-			metal = getTeamResource(teamID, "metal"),
-			energy = getTeamResource(teamID, "energy"),
-		})
+-- Logs "unitIdle" for a finished commander, constructor or factory without orders. The engine calls UnitIdle only
+-- when a unit's queue runs empty, not for a unit that is finished or given to a team without orders.
+local function logIdleIfNoOrders(unitID, unitDefID, unitTeam)
+	local isFactory = isFactoryDef[unitDefID]
+	if (isFactory or isBuilderDef[unitDefID]) and getQueueCount(unitID, isFactory) == 0 then
+		writeEvent("unitIdle", { unitID = unitID, unitDefID = unitDefID, unitTeam = unitTeam })
 	end
 end
 
@@ -440,24 +373,9 @@ function widget:GameFrame(frame)
 		isSkipSent = true
 		spSendCommands("skip f99999999")
 	end
-	if frame % BUILDER_SAMPLE_FRAMES == 0 then
-		for unitID in pairs(builders) do
-			logBuilderState(unitID, false)
-		end
-		for unitID in pairs(nanos) do
-			logBuilderState(unitID, false)
-		end
-		for unitID in pairs(factories) do
-			logBuilderState(unitID, true)
-		end
-	end
-	if frame % RESOURCES_FRAMES == 0 then
-		logTeamResources()
-	end
 end
 
 function widget:UnitCreated(unitID, unitDefID, unitTeam, builderID)
-	addUnit(unitID, unitDefID, unitTeam)
 	writeEvent(
 		"unitCreated",
 		addUnitPosition({
@@ -471,6 +389,7 @@ end
 
 function widget:UnitFinished(unitID, unitDefID, unitTeam)
 	writeEvent("unitFinished", { unitID = unitID, unitDefID = referenceUnitDef(unitDefID), unitTeam = unitTeam })
+	logIdleIfNoOrders(unitID, unitDefID, unitTeam)
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerDefID, attackerTeam, weaponDefID)
@@ -488,16 +407,60 @@ function widget:UnitDestroyed(unitID, unitDefID, unitTeam, attackerID, attackerD
 			weaponDefID = weaponDefID,
 		}, unitID)
 	)
-	removeUnit(unitID)
 end
 
 function widget:UnitGiven(unitID, unitDefID, newTeam, oldTeam)
-	removeUnit(unitID)
-	addUnit(unitID, unitDefID, newTeam)
 	writeEvent(
 		"unitGiven",
 		{ unitID = unitID, unitDefID = referenceUnitDef(unitDefID), newTeam = newTeam, oldTeam = oldTeam }
 	)
+	if not spGetUnitIsBeingBuilt(unitID) then
+		logIdleIfNoOrders(unitID, unitDefID, newTeam)
+	end
+end
+
+-- The command call-ins are logged for commanders, constructors and factories only: they tell when a builder is idle
+-- and what it was ordered to do. cmdID < 0 is a build of unit def -cmdID.
+local function isCommandLogged(unitDefID)
+	return isBuilderDef[unitDefID] or isFactoryDef[unitDefID]
+end
+
+function widget:UnitIdle(unitID, unitDefID, unitTeam)
+	if isCommandLogged(unitDefID) then
+		writeEvent("unitIdle", { unitID = unitID, unitDefID = unitDefID, unitTeam = unitTeam })
+	end
+end
+
+function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOpts, _, playerID, fromSynced, fromLua)
+	if isCommandLogged(unitDefID) then
+		writeEvent("unitCommand", {
+			unitID = unitID,
+			unitDefID = unitDefID,
+			unitTeam = unitTeam,
+			cmdID = cmdID < 0 and -referenceUnitDef(-cmdID) or cmdID,
+			cmdParams = cmdParams,
+			cmdOpts = cmdOpts and cmdOpts.coded,
+			playerID = playerID,
+			fromSynced = fromSynced,
+			fromLua = fromLua,
+		})
+	end
+end
+
+function widget:UnitCmdDone(unitID, unitDefID, unitTeam, cmdID, cmdParams)
+	if isCommandLogged(unitDefID) then
+		writeEvent("unitCmdDone", {
+			unitID = unitID,
+			unitDefID = unitDefID,
+			unitTeam = unitTeam,
+			cmdID = cmdID < 0 and -referenceUnitDef(-cmdID) or cmdID,
+			cmdParams = cmdParams,
+		})
+	end
+end
+
+function widget:TeamDied(teamID)
+	writeEvent("teamDied", { teamID = teamID })
 end
 
 function widget:GameOver(winningAllyTeams)
