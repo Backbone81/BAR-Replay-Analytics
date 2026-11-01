@@ -3,7 +3,7 @@ local widget = widget ---@type Widget
 function widget:GetInfo()
 	return {
 		name = "Replay Analytics",
-		desc = "Logs unit, economy and builder events of a replay to <replay name>_events.jsonl",
+		desc = "Logs unit, economy and builder events of a replay to <replay name>_events.json",
 		author = "Backbone",
 		date = "October 2026",
 		license = "GNU GPL, v2 or later",
@@ -14,8 +14,11 @@ end
 
 -- Logs the events of a replay played back in spring-headless. Unsynced, so it cannot desync.
 -- Active only in a headless replay; in a normal client, also when watching a replay, it removes itself.
--- Writes one JSON object per line to events/<replay name>_events.jsonl in the widget's own folder (BAR lets user widgets
--- write only under LuaUI/Config/ and LuaUI/Widgets/). Switches to full view, raises the speed
+-- Writes events/<replay name>_events.json in the widget's own folder (BAR lets user widgets write only under
+-- LuaUI/Config/ and LuaUI/Widgets/): one JSON object {"events":[...],"end":{"frame":...,"reason":...}}. Each event is
+-- {"frame":...,"<event name>":{...}}, one per line. "end" is written when logging stops, also when the replay stalls;
+-- its reason is "gameover" only if the game ended. A file without it is incomplete: the engine crashed or was stopped.
+-- Switches to full view, raises the speed
 -- limit (the pre-game start position phase of a replay otherwise plays in real time), skips to the end of the replay
 -- once the game runs, and quits the engine when the game is over or the replay stops advancing.
 
@@ -67,7 +70,7 @@ local BUILDER_SAMPLE_FRAMES = mathFloor(BUILDER_SAMPLE_SECONDS * GAME_SPEED)
 local ARMY_POSITIONS_FRAMES = ARMY_POSITIONS_SECONDS * GAME_SPEED
 
 -- The replay's file name without .sdfz (Spring.GetReplayFilePath() returns nil once the replay has ended).
-local EVENTS_FILE_NAME = (Game.demoPlayName or "replay") .. "_events.jsonl"
+local EVENTS_FILE_NAME = (Game.demoPlayName or "replay") .. "_events.json"
 
 -- Unit def lookups, filled in Initialize.
 local isFactoryDef = {}
@@ -77,6 +80,7 @@ local isArmyDef = {} -- mobile units that are not builders
 local isUnitDefLogged = {}
 
 local eventsFile -- nil while not logging
+local isFirstEvent = true
 local teamIDs = {} -- set of every team but Gaia
 
 -- unitID -> teamID
@@ -133,19 +137,21 @@ local function encodeJson(value)
 	return "null"
 end
 
-local function writeEvent(event)
+-- Writes {"frame":...,"<name>":<fields>} into the events array.
+local function writeEvent(name, fields)
 	if not eventsFile then
 		return
 	end
-	event.frame = spGetGameFrame()
-	eventsFile:write(encodeJson(event), "\n")
+	local separator = isFirstEvent and "" or ",\n"
+	isFirstEvent = false
+	eventsFile:write(separator, stringFormat('{"frame":%d,%s:%s}', spGetGameFrame(), encodeJson(name), encodeJson(fields)))
 end
 
 local function closeEventsFile(reason)
 	if not eventsFile then
 		return
 	end
-	writeEvent({ event = "end", reason = reason })
+	eventsFile:write('\n],"end":', encodeJson({ frame = spGetGameFrame(), reason = reason }), "}\n")
 	eventsFile:close()
 	eventsFile = nil
 end
@@ -171,8 +177,7 @@ local function getUnitDefName(unitDefID)
 	if not isUnitDefLogged[unitDefID] then
 		isUnitDefLogged[unitDefID] = true
 		local customParams = unitDef.customParams
-		writeEvent({
-			event = "unitDef",
+		writeEvent("unitDef", {
 			name = unitDef.name,
 			humanName = unitDef.translatedHumanName or unitDef.humanName,
 			metalCost = unitDef.metalCost,
@@ -283,7 +288,7 @@ local function logBuilderState(unitID)
 	builderStates[unitID] = state
 	builderCommands[unitID] = command
 	builderTargets[unitID] = target
-	writeEvent({ event = "builderState", unitID = unitID, state = state, command = command, targetID = target })
+	writeEvent("builderState", { unitID = unitID, state = state, command = command, targetID = target })
 end
 
 local function logResources()
@@ -312,8 +317,7 @@ local function logResources()
 		local metalCurrent, metalStorage, metalPull, metalIncome, metalExpense = spGetTeamResources(teamID, "metal")
 		local energyCurrent, energyStorage, energyPull, energyIncome, energyExpense =
 			spGetTeamResources(teamID, "energy")
-		writeEvent({
-			event = "resources",
+		writeEvent("resources", {
 			teamID = teamID,
 			metal = {
 				current = metalCurrent,
@@ -350,7 +354,7 @@ local function logArmyPositions()
 				end
 			end
 		end
-		writeEvent({ event = "armyPositions", teamID = teamID, units = units })
+		writeEvent("armyPositions", { teamID = teamID, units = units })
 	end
 end
 
@@ -382,10 +386,10 @@ function widget:Initialize()
 		widgetHandler:RemoveWidget()
 		return
 	end
+	eventsFile:write('{"events":[\n')
 	classifyUnitDefs()
 	spSendCommands("specfullview 1")
-	writeEvent({
-		event = "init",
+	writeEvent("init", {
 		map = Game.mapName,
 		mapSizeX = Game.mapSizeX,
 		mapSizeZ = Game.mapSizeZ,
@@ -444,8 +448,7 @@ end
 
 function widget:UnitCreated(unitID, unitDefID, teamID, builderID)
 	addUnit(unitID, unitDefID, teamID)
-	writeEvent({
-		event = "unitCreated",
+	writeEvent("unitCreated", {
 		unitID = unitID,
 		unitDef = getUnitDefName(unitDefID),
 		teamID = teamID,
@@ -456,14 +459,13 @@ function widget:UnitCreated(unitID, unitDefID, teamID, builderID)
 end
 
 function widget:UnitFinished(unitID, unitDefID, teamID)
-	writeEvent({ event = "unitFinished", unitID = unitID, unitDef = getUnitDefName(unitDefID), teamID = teamID })
+	writeEvent("unitFinished", { unitID = unitID, unitDef = getUnitDefName(unitDefID), teamID = teamID })
 end
 
 function widget:UnitDestroyed(unitID, unitDefID, teamID, _, attackerDefID, attackerTeamID, weaponDefID)
 	local _, _, _, _, buildProgress = spGetUnitHealth(unitID)
 	local weaponDef = weaponDefID and WeaponDefs[weaponDefID]
-	writeEvent({
-		event = "unitDestroyed",
+	writeEvent("unitDestroyed", {
 		unitID = unitID,
 		unitDef = getUnitDefName(unitDefID),
 		teamID = teamID,
@@ -479,8 +481,7 @@ end
 function widget:UnitGiven(unitID, unitDefID, newTeamID, oldTeamID)
 	removeUnit(unitID)
 	addUnit(unitID, unitDefID, newTeamID)
-	writeEvent({
-		event = "unitGiven",
+	writeEvent("unitGiven", {
 		unitID = unitID,
 		unitDef = getUnitDefName(unitDefID),
 		teamID = newTeamID,
@@ -489,6 +490,6 @@ function widget:UnitGiven(unitID, unitDefID, newTeamID, oldTeamID)
 end
 
 function widget:GameOver(winningAllyTeams)
-	writeEvent({ event = "gameOver", winningAllyTeamIDs = winningAllyTeams })
+	writeEvent("gameOver", { winningAllyTeamIDs = winningAllyTeams })
 	quit("gameover")
 end

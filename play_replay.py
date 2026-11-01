@@ -15,7 +15,7 @@ In the data dir, the script uses:
     rapid/          the game at the replay's version (with packages/ and pool/), downloaded the same way if missing
     LuaUI/Widgets/  the analytics widget (this repository) and any other widgets, e.g. bar-advisor
 
-The analytics widget writes events/<replay name>_events.jsonl in its own folder, and the engine output goes next to
+The analytics widget writes events/<replay name>_events.json in its own folder, and the engine output goes next to
 it as <replay name>.log. The script prints the progress, and stops the engine if the playback hangs: no new events
 (or, while the engine loads, no new log output) for a minute.
 """
@@ -341,14 +341,14 @@ def print_advisor_status(widgets_dir: Path) -> None:
 
 
 def last_frame(events: Path) -> int:
-    """Return the game frame of the last complete line of the events file, 0 if there is none yet."""
+    """Return the game frame of the last complete event of the events file (one per line), 0 if there is none yet."""
     with events.open("rb") as file:
         # Large enough for an armyPositions event of a big army.
         file.seek(max(0, events.stat().st_size - 65536))
         lines = file.read().splitlines()
     for line in reversed(lines):
         try:
-            return int(json.loads(line)["frame"])
+            return int(json.loads(line.removeprefix(b",").removesuffix(b","))["frame"])
         except (ValueError, KeyError, TypeError):  # a line cut off at the start of the window or still being written
             continue
     return 0
@@ -415,15 +415,19 @@ def run_engine(engine: Path, data_dir: Path, replay_file: Path, events: Path, lo
 
 
 def print_events_summary(events: Path) -> None:
-    """Print how many events the analytics widget wrote and the last one."""
-    count, last = 0, "-"
-    with events.open(encoding="utf-8", errors="replace") as file:
-        for line in file:
-            count += 1
-            last = line.strip()
-    print_field("events", count)
+    """Print how many events the analytics widget wrote and why it stopped ("gameover" if the game ended)."""
+    with events.open(encoding="utf-8") as file:
+        try:
+            document = json.load(file)
+        except json.JSONDecodeError:  # no end: the engine crashed or was stopped
+            document = {}
+    print_field("events", len(document["events"]) if "events" in document else "-")
     print_field("events file", events)
-    print_field("last event", last)
+    if "end" in document:
+        end = document["end"]
+        print_field("end", f"{end['reason']} at frame {end['frame']}")
+    else:
+        print_field("end", "none, the events file is incomplete")
 
 
 def play_replay(data_dir: Path, replay_name: str) -> None:
@@ -451,7 +455,7 @@ def play_replay(data_dir: Path, replay_name: str) -> None:
     print_field("engine dir", engine.parent)
 
     # The analytics widget names its output after the replay (Game.demoPlayName, the file name without .sdfz).
-    events = analytics_dir / "events" / f"{replay_file.stem}_events.jsonl"
+    events = analytics_dir / "events" / f"{replay_file.stem}_events.json"
     events.parent.mkdir(exist_ok=True)
     events.unlink(missing_ok=True)
     run_engine(engine, data_dir, replay_file, events, events.with_name(f"{replay_file.stem}.log"))

@@ -1,10 +1,10 @@
 """Report on the events a replay playback logged: build order, economy, builders and fights, per team.
 
-    python3 -I replay_events.py <replay>_events.jsonl               # windows of 5 min
-    python3 -I replay_events.py <replay>_events.jsonl --step 2      # 2 min windows
+    python3 -I replay_events.py <replay>_events.json                # windows of 5 min
+    python3 -I replay_events.py <replay>_events.json --step 2       # 2 min windows
     python3 -I replay_events.py <replay> --build-order-minutes 8    # build order of the first 8 min
 
-play_replay.py plays a replay back with the analytics widget, which writes events/<replay>_events.jsonl next to this
+play_replay.py plays a replay back with the analytics widget, which writes events/<replay>_events.json next to this
 script; the events file is looked up there. The teams are named from the replay's start script as in sdfz_stats.py,
 so the replay is looked up in the data dir's demos/ like play_replay.py does. The report has a header, then per
 team: build order of the first minutes, milestones (factories, first T2 unit, mex counts held, resurrections), a
@@ -32,7 +32,7 @@ from typing import Any
 
 HERE = Path(__file__).resolve().parent
 EVENTS_DIR = HERE / "events"  # where the analytics widget in this folder writes
-EVENTS_SUFFIX = "_events.jsonl"
+EVENTS_SUFFIX = "_events.json"
 
 GAME_SPEED = 30  # frames per second of game time (GAME_SPEED in the engine, Game.gameSpeed in Lua)
 
@@ -94,7 +94,7 @@ class Game:
     map_size: tuple[int, int] | None  # (mapSizeX, mapSizeZ) in elmos; None in events files from before 2026-10-27
     game_type: str
     events: list[Event]
-    event_count: int  # lines in the events file, as play_replay.py counts them
+    event_count: int  # events in the events file, as play_replay.py counts them
     end_frame: int  # of the last event, or of the first quit after drop_quit_losses
     team_labels: dict[int, dict[str, str]]  # teamID -> sdfz_stats.team_labels of the replay; empty without it
     by_type: dict[str, list[Event]] = field(init=False, repr=False)
@@ -151,7 +151,7 @@ class Windows:
 
 
 def find_events(name: str) -> Path:
-    """Return the events file name ("_events.jsonl" optional) in EVENTS_DIR."""
+    """Return the events file name ("_events.json" optional) in EVENTS_DIR."""
     events_file = EVENTS_DIR / (name if name.endswith(EVENTS_SUFFIX) else f"{name}{EVENTS_SUFFIX}")
     if not events_file.is_file():
         sys.exit(f"no events file {events_file.name} in {EVENTS_DIR}")
@@ -172,21 +172,35 @@ def read_team_labels(data_dir: Path, events_file: Path) -> tuple[Path | None, di
     return replay_file, sdfz_stats.team_labels(sdfz_stats.parse_script(replay["script"]))
 
 
+def flatten(event: dict[str, Any]) -> Event:
+    """Return an event of the events file, {"frame": ..., "<name>": {...}}, as {"event": name, "frame": ..., ...}."""
+    [(name, fields)] = [(key, value) for key, value in event.items() if key != "frame"]
+    return {"event": name, "frame": event["frame"], **fields}
+
+
 def load(path: Path, team_labels: dict[int, dict[str, str]]) -> Game:
-    """Read the events file the analytics widget wrote: one JSON object per line."""
-    unit_defs, init, events = {}, {}, []
+    """Read the events file the analytics widget wrote: {"events": [...], "end": {...}}.
+
+    Exits if the file is incomplete (no "end": the engine crashed or was stopped). The end becomes an "end" event.
+    """
     with path.open(encoding="utf-8") as file:
-        for line in file:
-            event = json.loads(line)
-            if event["event"] == "unitDef":
-                unit_defs[event["name"]] = event
-            elif event["event"] == "init":
-                init = event
-            else:
-                events.append(event)
+        try:
+            document = json.load(file)
+        except json.JSONDecodeError as error:
+            sys.exit(f"{path.name} is incomplete or invalid: {error}")
+    if "end" not in document:
+        sys.exit(f"{path.name} is incomplete: it has no end")
+    unit_defs, init, events = {}, {}, []
+    for event in [*map(flatten, document["events"]), {"event": "end", **document["end"]}]:
+        if event["event"] == "unitDef":
+            unit_defs[event["name"]] = event
+        elif event["event"] == "init":
+            init = event
+        else:
+            events.append(event)
     teams = {team["teamID"]: team for team in init.get("teams", [])}
     end_frame = max((event["frame"] for event in events), default=0)
-    event_count = len(events) + len(unit_defs) + bool(init)
+    event_count = len(document["events"])
     map_name, game_type = init.get("map", "?"), init.get("game", "?")
     map_size = (init["mapSizeX"], init["mapSizeZ"]) if "mapSizeX" in init and "mapSizeZ" in init else None
     return Game(unit_defs, teams, map_name, map_size, game_type, events, event_count, end_frame, team_labels)

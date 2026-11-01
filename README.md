@@ -12,7 +12,7 @@ In the order they are usually run:
    game version, map, teams) and per team metal and energy produced, used and wasted, damage, and units produced,
    killed and lost, in time windows. That is all a replay stores itself: no unit types, build order or positions.
 2. `play_replay.py` plays the replay back in a headless engine at maximum speed, with the analytics widget
-   `dbg_replay_analytics.lua` logging every unit event, income and builder state to a JSON lines file. It downloads
+   `dbg_replay_analytics.lua` logging every unit event, income and builder state to a JSON file. It downloads
    the engine, game and map versions the replay needs if they are missing. A 27-minute 1v1 takes about 1.5 minutes.
 3. `replay_events.py` turns that events file into a report per team: build order, milestones (factories, tech 2,
    metal extractors), a timeline of units, army value and income, what each builder did and how long it stood idle,
@@ -44,7 +44,7 @@ is untrusted input:
 ```
 cd "<BAR data dir>/LuaUI/Widgets/bar-replay-analytics"
 python3 -I sdfz_stats.py "../../../demos/<replay>.sdfz"         # quick overview, 5 min windows (--step 1: 1 min)
-python3 -I play_replay.py "<replay>"                            # playback, writes events/<replay>_events.jsonl
+python3 -I play_replay.py "<replay>"                            # playback, writes events/<replay>_events.json
 python3 -I replay_events.py "<replay>" > "events/<replay>.txt"  # the full report
 ```
 
@@ -57,11 +57,16 @@ A playback changes the data dir like watching a replay in the client does: BAR s
 
 ## Events file
 
-One JSON object per line. Every event has `event` (its type) and `frame` (30 per second). Unit types are given by
-their def name (`unitDef`, e.g. `corcom`), positions as `[x, z]` in map coordinates (elmos). Fields without a value
-are left out.
+One JSON object, `{"events": [...], "end": {"frame": ..., "reason": ...}}`, with one event per line. Each event holds
+its `frame` (30 per second) and its fields under one key, the event's name: `{"frame": 0, "unitFinished": {"unitID":
+2858, "unitDef": "corcom", "teamID": 0}}`. Unit types are given by their def name (`unitDef`, e.g. `corcom`), positions
+as `[x, z]` in map coordinates (elmos). Fields without a value are left out.
 
-| `event` | When | Fields |
+`end` is written when the widget stops logging. Its `reason` is `gameover` if the game ended, otherwise `stalled` (the
+replay stopped advancing), `never started` or `shutdown`. A file without `end` is incomplete: the engine crashed or
+was stopped.
+
+| Event | When | Fields |
 | --- | --- | --- |
 | `init` | first | `map`, `mapSizeX`, `mapSizeZ` (in elmos), `game` (name and version), `teams`: list of `teamID`, `allyTeamID`, `isAI`, `side`, `name` |
 | `unitDef` | first time a unit type shows up | `name`, `humanName`, `metalCost`, `energyCost`, `buildTime`, `techLevel`, `unitGroup`, `isFactory`, `isBuilder`, `isCommander` (BAR's `customParams.iscommander`), `isMobile`, `buildDistance` (builders), `canResurrect`, `canFly`, `extractsMetal`, `energyMake`, `windGenerator`, `maxWeaponRange` |
@@ -73,7 +78,6 @@ are left out.
 | `armyPositions` | every 30 s per team | `teamID`, `units`: list of `unitDef`, `position` (mobile units that are not builders) |
 | `builderState` | a commander's, constructor's or nano turret's state changes (sampled every 0.5 s) | `unitID`, `state` (`working`, `busy`: has orders but no work yet, mostly walking, or `idle`: no orders), `command` (the engine command ID; negative: building that unit def), `targetID` |
 | `gameOver` | the game ends | `winningAllyTeamIDs` |
-| `end` | last | `reason`: `gameover`, `stalled` (the replay stopped advancing), `never started` or `shutdown` |
 
 ## Development
 
