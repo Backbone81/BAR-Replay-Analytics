@@ -57,10 +57,25 @@ A playback changes the data dir like watching a replay in the client does: BAR s
 
 ## Events file
 
-One JSON object, `{"events": [...], "end": {"frame": ..., "reason": ...}}`, with one event per line. Each event holds
-its `frame` (30 per second) and its fields under one key, the event's name: `{"frame": 0, "unitFinished": {"unitID":
-2858, "unitDef": "corcom", "teamID": 0}}`. Unit types are given by their def name (`unitDef`, e.g. `corcom`), positions
-as `[x, z]` in map coordinates (elmos). Fields without a value are left out.
+One JSON object, with one event per line:
+
+```
+{"events": [...], "game": {...}, "teams": [...], "unitDefs": {"<unitDefID>": {...}}, "end": {"frame": ..., "reason": ...}}
+```
+
+Each event holds its `frame` (30 per second) and its fields under one key, the event's name: `{"frame": 0,
+"unitFinished": {"unitID": 2858, "unitDefID": 101, "unitTeam": 0}}`. Events are named after the call-in or `Spring`
+function they come from, in lower camel case (`unitCreated` is `widget:UnitCreated`), and so are their fields
+(`unitTeam`, `attackerDefID`, `currentLevel`). Unit types are given by `unitDefID`, positions as `x` and `z` in elmos,
+rounded down. Fields without a value are left out.
+
+What does not change during the game is written once, after the events:
+
+| Key | Fields |
+| --- | --- |
+| `game` | `mapName`, `mapSizeX`, `mapSizeZ` (in elmos), `gameName`, `gameVersion`, `maxUnits` (`Game.maxUnits`) |
+| `teams` | list of `teamID`, `allyTeam`, `isAI`, `side` (as `Spring.GetTeamInfo`), `startUnit` (the commander's `unitDefID`: BAR's team rules param `startUnit`, which also tells the faction of a `random` side), `name` |
+| `unitDefs` | the unit defs the events and teams refer to, by `unitDefID`, with these fields of `UnitDefs`: `name`, `translatedHumanName`, `metalCost`, `energyCost`, `buildTime`, `isFactory`, `isBuilder`, `canMove`, `buildDistance`, `canResurrect`, `extractsMetal`, `energyMake`, `windGenerator`, `maxWeaponRange`, `customParams` (`techlevel`, `unitgroup`, `iscommander`, as strings) |
 
 `end` is written when the widget stops logging. Its `reason` is `gameover` if the game ended, otherwise `stalled` (the
 replay stopped advancing), `never started` or `shutdown`. A file without `end` is incomplete: the engine crashed or
@@ -68,16 +83,13 @@ was stopped.
 
 | Event | When | Fields |
 | --- | --- | --- |
-| `init` | first | `map`, `mapSizeX`, `mapSizeZ` (in elmos), `game` (name and version), `teams`: list of `teamID`, `allyTeamID`, `isAI`, `side`, `name` |
-| `unitDef` | first time a unit type shows up | `name`, `humanName`, `metalCost`, `energyCost`, `buildTime`, `techLevel`, `unitGroup`, `isFactory`, `isBuilder`, `isCommander` (BAR's `customParams.iscommander`), `isMobile`, `buildDistance` (builders), `canResurrect`, `canFly`, `extractsMetal`, `energyMake`, `windGenerator`, `maxWeaponRange` |
-| `unitCreated` | a unit is started (or spawned) | `unitID`, `unitDef`, `teamID`, `position`, `builderID`, `builderDef` |
-| `unitFinished` | a unit is finished | `unitID`, `unitDef`, `teamID` |
-| `unitDestroyed` | a unit dies | `unitID`, `unitDef`, `teamID`, `position`, `buildProgress`, `attackerDef`, `attackerTeamID`, `weapon` |
-| `unitGiven` | a unit changes team | `unitID`, `unitDef`, `teamID` (new), `oldTeamID` |
-| `resources` | every 5 s per team | `teamID`, `metal` and `energy` (each `current`, `storage`, `pull`, `income`, `expense`), `unitCount`, `builderCount`, `idleBuilderCount`, `factoryCount`, `idleFactoryCount` |
-| `armyPositions` | every 30 s per team | `teamID`, `units`: list of `unitDef`, `position` (mobile units that are not builders) |
-| `builderState` | a commander's, constructor's or nano turret's state changes (sampled every 0.5 s) | `unitID`, `state` (`working`, `busy`: has orders but no work yet, mostly walking, or `idle`: no orders), `command` (the engine command ID; negative: building that unit def), `targetID` |
-| `gameOver` | the game ends | `winningAllyTeamIDs` |
+| `unitCreated` | a unit is started (or spawned) | `unitID`, `unitDefID`, `unitTeam`, `x`, `z`, `builderID` |
+| `unitFinished` | a unit is finished | `unitID`, `unitDefID`, `unitTeam` |
+| `unitDestroyed` | a unit dies | `unitID`, `unitDefID`, `unitTeam`, `x`, `z`, `buildProgress`, `attackerID`, `attackerDefID`, `attackerTeam`, `weaponDefID` (negative: `Game.envDamageTypes`, e.g. `SelfD`) |
+| `unitGiven` | a unit changes team | `unitID`, `unitDefID`, `newTeam`, `oldTeam` |
+| `teamResources` | every 5 s per team | `teamID`, `metal` and `energy`, each with the first values of `Spring.GetTeamResources`: `currentLevel`, `storage`, `pull`, `income`, `expense` |
+| `builderState` | a commander's, constructor's, nano turret's or factory's state changes (sampled every 0.5 s) | `unitID`, `state` (`working`, `busy`: has orders but no work yet, mostly walking, or `idle`: no orders), `cmdID` and `targetID` (of `Spring.GetUnitWorkerTask` while working: a build is `-unitDefID`, a feature target is `featureID + Game.maxUnits`) |
+| `gameOver` | the game ends | `winningAllyTeams` |
 
 ## Development
 

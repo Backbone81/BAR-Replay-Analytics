@@ -343,7 +343,7 @@ def print_advisor_status(widgets_dir: Path) -> None:
 def last_frame(events: Path) -> int:
     """Return the game frame of the last complete event of the events file (one per line), 0 if there is none yet."""
     with events.open("rb") as file:
-        # Large enough for an armyPositions event of a big army.
+        # Large enough for several complete events.
         file.seek(max(0, events.stat().st_size - 65536))
         lines = file.read().splitlines()
     for line in reversed(lines):

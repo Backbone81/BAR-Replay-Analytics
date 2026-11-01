@@ -66,8 +66,8 @@ GRID_COLUMNS = "ABCDEFGH"[:GRID_SIZE]  # west to east; rows are numbered north t
 GRID_CELL_WIDTH = 9
 
 Event = dict[str, Any]
-UnitDef = dict[str, Any]  # a "unitDef" event
-Team = dict[str, Any]  # an entry of the "init" event's teams
+UnitDef = dict[str, Any]  # a unit def as convert_unit_def returns it
+Team = dict[str, Any]  # a team of the events file, as load converts it
 
 
 def import_sibling(name: str) -> ModuleType:
@@ -86,12 +86,12 @@ sdfz_stats = play_replay.sdfz_stats
 
 @dataclass
 class Game:
-    """The events file: unit types and teams from its first events, and all other events in order."""
+    """The events file: unit types, teams and the game, and the events in order (converted, see EventConverter)."""
 
-    unit_defs: dict[str, UnitDef]  # UnitDef name -> its "unitDef" event
+    unit_defs: dict[str, UnitDef]  # UnitDef name -> unit def
     teams: dict[int, Team]  # teamID -> team
     map_name: str
-    map_size: tuple[int, int] | None  # (mapSizeX, mapSizeZ) in elmos; None in events files from before 2026-10-27
+    map_size: tuple[int, int] | None  # (mapSizeX, mapSizeZ) in elmos
     game_type: str
     events: list[Event]
     event_count: int  # events in the events file, as play_replay.py counts them
@@ -178,8 +178,123 @@ def flatten(event: dict[str, Any]) -> Event:
     return {"event": name, "frame": event["frame"], **fields}
 
 
+def convert_unit_def(unit_def: dict[str, Any]) -> UnitDef:
+    """Return a unit def of the events file (fields of the engine's UnitDefs) as this script uses it."""
+    custom_params = unit_def.get("customParams", {})
+    is_factory = unit_def.get("isFactory", False)
+    return {
+        "name": unit_def["name"],
+        "humanName": unit_def.get("translatedHumanName", unit_def["name"]),
+        "metalCost": unit_def.get("metalCost", 0),
+        "techLevel": int(float(custom_params.get("techlevel") or 1)),
+        "unitGroup": custom_params.get("unitgroup"),
+        "isFactory": is_factory,
+        "isBuilder": unit_def.get("isBuilder", False) and not is_factory,  # commanders, constructors, nano turrets
+        "isCommander": bool(custom_params.get("iscommander")),
+        "isMobile": unit_def.get("canMove", False) and not is_factory,
+        "buildDistance": unit_def.get("buildDistance", 0),
+        "canResurrect": unit_def.get("canResurrect", False),
+        "extractsMetal": unit_def.get("extractsMetal", 0),
+        "energyMake": unit_def.get("energyMake", 0),
+        "windGenerator": unit_def.get("windGenerator", 0),
+        "maxWeaponRange": unit_def.get("maxWeaponRange", 0),
+    }
+
+
+class EventConverter:
+    """Converts the events of the events file, in order, to the events this script works with.
+
+    Those name unit types by UnitDef name and teams by teamID, as the widget wrote them before 2026-11-01. Builder
+    states of factories become "factoryState" events. "teamResources" become "resources" events with the number of
+    idle builders (finished commanders and constructors without orders) and idle factories (finished, not building) at
+    that frame, from the latest builder states.
+    """
+
+    def __init__(self, unit_defs: dict[int, UnitDef]) -> None:
+        self.unit_defs = unit_defs
+        self.unit_def_ids: dict[int, int] = {}  # unitID -> unitDefID
+        self.unit_teams: dict[int, int] = {}  # unitID -> teamID
+        self.finished: set[int] = set()  # unitIDs of finished units alive
+        self.states: dict[int, str] = {}  # unitID -> latest builder state
+
+    def def_name(self, unit_def_id: int | None) -> str | None:
+        return self.unit_defs[unit_def_id]["name"] if unit_def_id in self.unit_defs else None
+
+    def unit_def_of(self, unit_id: int) -> UnitDef:
+        return self.unit_defs.get(self.unit_def_ids.get(unit_id, -1), {})
+
+    def idle_count(self, team_id: int, is_counted: Callable[[UnitDef, str | None], bool]) -> int:
+        return sum(
+            1
+            for unit_id in self.finished
+            if self.unit_teams.get(unit_id) == team_id
+            and is_counted(self.unit_def_of(unit_id), self.states.get(unit_id))
+        )
+
+    def convert(self, event: Event) -> Event:
+        """Return the event as this script uses it."""
+        name, frame = event["event"], event["frame"]
+        converted: Event = {"event": name, "frame": frame}
+        if "x" in event and "z" in event:
+            converted["position"] = [event["x"], event["z"]]
+        if name in ("unitCreated", "unitFinished", "unitDestroyed", "unitGiven"):
+            unit_id = event["unitID"]
+            converted |= {"unitID": unit_id, "unitDef": self.def_name(event["unitDefID"])}
+            converted["teamID"] = event["newTeam"] if name == "unitGiven" else event["unitTeam"]
+        if name == "unitCreated":
+            self.unit_def_ids[unit_id] = event["unitDefID"]
+            self.unit_teams[unit_id] = event["unitTeam"]
+            if event.get("builderID") is not None:
+                converted["builderID"] = event["builderID"]
+                if builder_def := self.def_name(self.unit_def_ids.get(event["builderID"])):
+                    converted["builderDef"] = builder_def
+        elif name == "unitFinished":
+            self.finished.add(unit_id)
+        elif name == "unitDestroyed":
+            converted["buildProgress"] = event.get("buildProgress")
+            if event.get("attackerDefID") is not None:
+                converted["attackerDef"] = self.def_name(event["attackerDefID"])
+            if event.get("attackerTeam") is not None:
+                converted["attackerTeamID"] = event["attackerTeam"]
+            self.finished.discard(unit_id)
+            self.states.pop(unit_id, None)
+        elif name == "unitGiven":
+            converted["oldTeamID"] = event["oldTeam"]
+            self.unit_teams[unit_id] = event["newTeam"]
+            self.states.pop(unit_id, None)
+        elif name == "builderState":
+            unit_id = event["unitID"]
+            self.states[unit_id] = event["state"]
+            converted |= {"unitID": unit_id, "state": event["state"]}
+            if self.unit_def_of(unit_id).get("isFactory"):
+                converted["event"] = "factoryState"
+            for key, old_key in (("cmdID", "command"), ("targetID", "targetID")):
+                if event.get(key) is not None:
+                    converted[old_key] = event[key]
+        elif name == "teamResources":
+            team_id = event["teamID"]
+            converted["event"] = "resources"
+            converted["teamID"] = team_id
+            for resource in ("metal", "energy"):
+                values = event[resource]
+                converted[resource] = {
+                    "current": values["currentLevel"],
+                    **{key: values[key] for key in ("storage", "pull", "income", "expense")},
+                }
+            converted["idleBuilderCount"] = self.idle_count(
+                team_id,
+                lambda unit_def, state: unit_def.get("isBuilder") and unit_def.get("isMobile") and state == "idle",
+            )
+            converted["idleFactoryCount"] = self.idle_count(
+                team_id, lambda unit_def, state: unit_def.get("isFactory") and state != "working"
+            )
+        elif name == "gameOver":
+            converted["winningAllyTeamIDs"] = event["winningAllyTeams"]
+        return converted
+
+
 def load(path: Path, team_labels: dict[int, dict[str, str]]) -> Game:
-    """Read the events file the analytics widget wrote: {"events": [...], "end": {...}}.
+    """Read the events file the analytics widget wrote: {"events": [...], "game": ..., "end": {...}, ...}.
 
     Exits if the file is incomplete (no "end": the engine crashed or was stopped). The end becomes an "end" event.
     """
@@ -190,20 +305,37 @@ def load(path: Path, team_labels: dict[int, dict[str, str]]) -> Game:
             sys.exit(f"{path.name} is incomplete or invalid: {error}")
     if "end" not in document:
         sys.exit(f"{path.name} is incomplete: it has no end")
-    unit_defs, init, events = {}, {}, []
-    for event in [*map(flatten, document["events"]), {"event": "end", **document["end"]}]:
-        if event["event"] == "unitDef":
-            unit_defs[event["name"]] = event
-        elif event["event"] == "init":
-            init = event
-        else:
-            events.append(event)
-    teams = {team["teamID"]: team for team in init.get("teams", [])}
+    unit_defs_by_id = {int(key): convert_unit_def(value) for key, value in document["unitDefs"].items()}
+    converter = EventConverter(unit_defs_by_id)
+    events = [converter.convert(flatten(event)) for event in document["events"]]
+    events.append({"event": "end", **document["end"]})
+    unit_defs = {unit_def["name"]: unit_def for unit_def in unit_defs_by_id.values()}
+    teams = {
+        team["teamID"]: {
+            "teamID": team["teamID"],
+            "allyTeamID": team["allyTeam"],
+            "isAI": team["isAI"],
+            "side": team["side"],
+            "startUnit": converter.def_name(team.get("startUnit")),
+            "name": team["name"],
+        }
+        for team in document["teams"]
+    }
+    game_setup = document["game"]
     end_frame = max((event["frame"] for event in events), default=0)
-    event_count = len(document["events"])
-    map_name, game_type = init.get("map", "?"), init.get("game", "?")
-    map_size = (init["mapSizeX"], init["mapSizeZ"]) if "mapSizeX" in init and "mapSizeZ" in init else None
-    return Game(unit_defs, teams, map_name, map_size, game_type, events, event_count, end_frame, team_labels)
+    map_size = (game_setup["mapSizeX"], game_setup["mapSizeZ"])
+    game_type = f"{game_setup['gameName']} {game_setup['gameVersion']}"
+    return Game(
+        unit_defs,
+        teams,
+        game_setup["mapName"],
+        map_size,
+        game_type,
+        events,
+        len(document["events"]),
+        end_frame,
+        team_labels,
+    )
 
 
 def find_quits(game: Game) -> dict[int, tuple[int, int]]:
