@@ -75,7 +75,7 @@ What does not change during the game, or the engine already records, is written 
 | Key | Fields |
 | --- | --- |
 | `game` | `mapName`, `mapSizeX`, `mapSizeZ` (in elmos), `gameName`, `gameVersion`, `maxUnits` (`Game.maxUnits`) |
-| `teams` | list of `teamID`, `allyTeam`, `hasAI`, `side` (as `Spring.GetTeamInfo`), `startUnit` (the commander's `unitDefID`: BAR's team rules param `startUnit`, which also tells the faction of a `random` side), `name` |
+| `teams` | list of `teamID`, `leader`, `isDead`, `hasAI`, `side`, `allyTeam`, `incomeMultiplier`, `customTeamKeys` (as `Spring.GetTeamInfo` returns them at the end of the game), `startUnit` (the commander's `unitDefID`: BAR's team rules param `startUnit`, which also tells the faction of a `random` side), `name` |
 | `teamStats` | every team's statistics history by `teamID`, as `Spring.GetTeamStatsHistory` returns it: an entry every 15 s with `time`, `frame` and the totals since the start of the game (`metalProduced`, `metalUsed`, `metalExcess`, `metalSent`, `metalReceived`, the same for energy, `damageDealt`, `damageReceived`, `unitsProduced`, `unitsDied`, `unitsKilled`, `unitsSent`, `unitsReceived`, `unitsCaptured`, `unitsOutCaptured`) |
 | `unitDefs` | the unit defs the events and teams refer to, by `unitDefID`, with these fields of `UnitDefs`: `name`, `translatedHumanName`, `metalCost`, `energyCost`, `buildTime`, `isFactory`, `isBuilder`, `canMove`, `buildDistance`, `canResurrect`, `extractsMetal`, `energyMake`, `windGenerator`, `maxWeaponRange`, `customParams` (`techlevel`, `unitgroup`, `iscommander`, as strings) |
 
@@ -91,7 +91,7 @@ was stopped.
 | `unitGiven` | a unit changes team | `unitID`, `unitDefID`, `newTeam`, `oldTeam` |
 | `unitIdle` | a commander's, constructor's or factory's queue ran empty, or it is finished or given without orders | `unitID`, `unitDefID`, `unitTeam` |
 | `unitCommand` | a commander, constructor or factory is given a command (also states, stop, remove: not every command enters the queue) | `unitID`, `unitDefID`, `unitTeam`, `cmdID` (a build is `-unitDefID`), `cmdParams`, `cmdOpts` (`CommandOptions.coded`), `playerID`, `fromSynced`, `fromLua` |
-| `unitCmdDone` | a commander, constructor or factory finished a command | `unitID`, `unitDefID`, `unitTeam`, `cmdID`, `cmdParams` |
+| `unitCmdDone` | a commander, constructor or factory finished a command | `unitID`, `unitDefID`, `unitTeam`, `cmdID`, `cmdParams`, `cmdOpts`, `cmdTag` (the command's tag in the queue) |
 | `teamDied` | a team died (resigned, left or wiped out); BAR then removes its units | `teamID` |
 | `gameOver` | the game ends | `winningAllyTeams` |
 

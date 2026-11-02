@@ -167,20 +167,25 @@ local function getTeamName(teamID, leaderID, hasAI)
 	return spGetPlayerInfo(leaderID, false)
 end
 
--- Every team but Gaia, with the commander it started with: BAR's team rules param "startUnit" (a unitDefID), which
--- also tells the faction of a team whose side is "random".
+-- Every team but Gaia, with what Spring.GetTeamInfo returns and the commander it started with: BAR's team rules param
+-- "startUnit" (a unitDefID), which also tells the faction of a team whose side is "random".
 local function getTeams()
 	local teams = {}
 	for _, teamID in ipairs(spGetTeamList()) do
 		if teamIDs[teamID] then
-			local _, leaderID, _, hasAI, side, allyTeamID = spGetTeamInfo(teamID, false)
+			local _, leader, isDead, hasAI, side, allyTeam, incomeMultiplier, customTeamKeys =
+				spGetTeamInfo(teamID, true)
 			teams[#teams + 1] = {
 				teamID = teamID,
-				allyTeam = allyTeamID,
+				leader = leader,
+				isDead = isDead,
 				hasAI = hasAI,
 				side = side,
+				allyTeam = allyTeam,
+				incomeMultiplier = incomeMultiplier,
+				customTeamKeys = jsonObject(customTeamKeys or {}),
 				startUnit = referenceUnitDef(tonumber(spGetTeamRulesParam(teamID, "startUnit"))),
-				name = getTeamName(teamID, leaderID, hasAI),
+				name = getTeamName(teamID, leader, hasAI),
 			}
 		end
 	end
@@ -447,7 +452,7 @@ function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOp
 	end
 end
 
-function widget:UnitCmdDone(unitID, unitDefID, unitTeam, cmdID, cmdParams)
+function widget:UnitCmdDone(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOpts, cmdTag)
 	if isCommandLogged(unitDefID) then
 		writeEvent("unitCmdDone", {
 			unitID = unitID,
@@ -455,6 +460,8 @@ function widget:UnitCmdDone(unitID, unitDefID, unitTeam, cmdID, cmdParams)
 			unitTeam = unitTeam,
 			cmdID = cmdID < 0 and -referenceUnitDef(-cmdID) or cmdID,
 			cmdParams = cmdParams,
+			cmdOpts = cmdOpts and cmdOpts.coded,
+			cmdTag = cmdTag,
 		})
 	end
 end
