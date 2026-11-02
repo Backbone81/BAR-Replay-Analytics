@@ -75,7 +75,7 @@ What does not change during the game, or the engine already records, is written 
 | Key | Fields |
 | --- | --- |
 | `game` | `mapName`, `mapSizeX`, `mapSizeZ` (in elmos), `gameName`, `gameVersion`, `maxUnits` (`Game.maxUnits`) |
-| `teams` | list of `teamID`, `allyTeam`, `isAI`, `side` (as `Spring.GetTeamInfo`), `startUnit` (the commander's `unitDefID`: BAR's team rules param `startUnit`, which also tells the faction of a `random` side), `name` |
+| `teams` | list of `teamID`, `allyTeam`, `hasAI`, `side` (as `Spring.GetTeamInfo`), `startUnit` (the commander's `unitDefID`: BAR's team rules param `startUnit`, which also tells the faction of a `random` side), `name` |
 | `teamStats` | every team's statistics history by `teamID`, as `Spring.GetTeamStatsHistory` returns it: an entry every 15 s with `time`, `frame` and the totals since the start of the game (`metalProduced`, `metalUsed`, `metalExcess`, `metalSent`, `metalReceived`, the same for energy, `damageDealt`, `damageReceived`, `unitsProduced`, `unitsDied`, `unitsKilled`, `unitsSent`, `unitsReceived`, `unitsCaptured`, `unitsOutCaptured`) |
 | `unitDefs` | the unit defs the events and teams refer to, by `unitDefID`, with these fields of `UnitDefs`: `name`, `translatedHumanName`, `metalCost`, `energyCost`, `buildTime`, `isFactory`, `isBuilder`, `canMove`, `buildDistance`, `canResurrect`, `extractsMetal`, `energyMake`, `windGenerator`, `maxWeaponRange`, `customParams` (`techlevel`, `unitgroup`, `iscommander`, as strings) |
 

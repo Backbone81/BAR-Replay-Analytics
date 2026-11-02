@@ -271,7 +271,7 @@ def load(path: Path, team_labels: dict[int, dict[str, str]]) -> Game:
         team["teamID"]: {
             "teamID": team["teamID"],
             "allyTeamID": team["allyTeam"],
-            "isAI": team["isAI"],
+            "hasAI": team["hasAI"],
             "side": team["side"],
             "startUnit": converter.def_name(team.get("startUnit")),
             "name": team["name"],

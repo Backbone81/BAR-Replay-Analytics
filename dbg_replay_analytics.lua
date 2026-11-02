@@ -159,8 +159,8 @@ local function getGame()
 	}
 end
 
-local function getTeamName(teamID, leaderID, isAI)
-	if isAI then
+local function getTeamName(teamID, leaderID, hasAI)
+	if hasAI then
 		local _, aiName, _, shortName = spGetAIInfo(teamID)
 		return (aiName or "AI") .. " (" .. tostring(shortName) .. ")"
 	end
@@ -173,14 +173,14 @@ local function getTeams()
 	local teams = {}
 	for _, teamID in ipairs(spGetTeamList()) do
 		if teamIDs[teamID] then
-			local _, leaderID, _, isAI, side, allyTeamID = spGetTeamInfo(teamID, false)
+			local _, leaderID, _, hasAI, side, allyTeamID = spGetTeamInfo(teamID, false)
 			teams[#teams + 1] = {
 				teamID = teamID,
 				allyTeam = allyTeamID,
-				isAI = isAI,
+				hasAI = hasAI,
 				side = side,
 				startUnit = referenceUnitDef(tonumber(spGetTeamRulesParam(teamID, "startUnit"))),
-				name = getTeamName(teamID, leaderID, isAI),
+				name = getTeamName(teamID, leaderID, hasAI),
 			}
 		end
 	end
