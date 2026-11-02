@@ -214,6 +214,7 @@ local function getUnitDefs()
 			isFactory = unitDef.isFactory,
 			isBuilder = unitDef.isBuilder,
 			canMove = unitDef.canMove,
+			buildSpeed = unitDef.buildSpeed,
 			buildDistance = unitDef.buildDistance,
 			canResurrect = unitDef.canResurrect,
 			extractsMetal = unitDef.extractsMetal,
