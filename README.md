@@ -60,8 +60,8 @@ A playback changes the data dir like watching a replay in the client does: BAR s
 One JSON object, with one event per line:
 
 ```
-{"events": [...], "game": {...}, "teams": [...], "teamStats": {"<teamID>": [...]}, "unitDefs": {"<unitDefID>": {...}},
- "end": {"frame": ..., "reason": ...}}
+{"events": [...], "game": {...}, "sides": [...], "teams": [...], "teamStats": {"<teamID>": [...]},
+ "unitDefs": {"<unitDefID>": {...}}, "end": {"frame": ..., "reason": ...}}
 ```
 
 Each event holds its `frame` (30 per second) and its fields under one key, the event's name: `{"frame": 0,
@@ -75,7 +75,8 @@ What does not change during the game, or the engine already records, is written 
 | Key | Fields |
 | --- | --- |
 | `game` | `mapName`, `mapSizeX`, `mapSizeZ` (in elmos), `gameName`, `gameVersion`, `maxUnits` (`Game.maxUnits`) |
-| `teams` | list of `teamID`, `leader`, `isDead`, `hasAI`, `side`, `allyTeam`, `incomeMultiplier`, `customTeamKeys` (as `Spring.GetTeamInfo` returns them at the end of the game), `startUnit` (the commander's `unitDefID`: BAR's team rules param `startUnit`, which also tells the faction of a `random` side), `name` |
+| `sides` | list of the game's sides (factions) as `Spring.GetSideData()` returns them: `sideName` (lowercase), `caseName` (as the game names it, e.g. `Cortex`), `startUnit` (the unit def name of its commander) |
+| `teams` | list of `teamID`, `leader`, `isDead`, `hasAI`, `side`, `allyTeam`, `incomeMultiplier`, `customTeamKeys` (as `Spring.GetTeamInfo` returns them at the end of the game), `startUnit` (the commander's `unitDefID`: BAR's team rules param `startUnit`, whose side in `sides` is the faction the team played, also for a `random` side), `name` |
 | `teamStats` | every team's statistics history by `teamID`, as `Spring.GetTeamStatsHistory` returns it: an entry every 15 s with `time`, `frame` and the totals since the start of the game (`metalProduced`, `metalUsed`, `metalExcess`, `metalSent`, `metalReceived`, the same for energy, `damageDealt`, `damageReceived`, `unitsProduced`, `unitsDied`, `unitsKilled`, `unitsSent`, `unitsReceived`, `unitsCaptured`, `unitsOutCaptured`) |
 | `unitDefs` | the unit defs the events and teams refer to, by `unitDefID`, with these fields of `UnitDefs`: `name`, `translatedHumanName`, `metalCost`, `energyCost`, `buildTime`, `isFactory`, `isBuilder`, `canMove`, `buildDistance`, `canResurrect`, `extractsMetal`, `energyMake`, `windGenerator`, `maxWeaponRange`, `customParams` (`techlevel`, `unitgroup`, `iscommander`, as strings) |
 

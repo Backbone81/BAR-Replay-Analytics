@@ -16,11 +16,11 @@ end
 -- Active only in a headless replay; in a normal client, also when watching a replay, it removes itself.
 -- Writes events/<replay name>_events.json in the widget's own folder (BAR lets user widgets write only under
 -- LuaUI/Config/ and LuaUI/Widgets/), one JSON object:
---   {"events":[...],"game":{...},"teams":[...],"teamStats":{"<teamID>":[...]},"unitDefs":{"<unitDefID>":{...}},
---    "end":{"frame":...,"reason":...}}
+--   {"events":[...],"game":{...},"sides":[...],"teams":[...],"teamStats":{"<teamID>":[...]},
+--    "unitDefs":{"<unitDefID>":{...}},"end":{"frame":...,"reason":...}}
 -- Each event is {"frame":...,"<event name>":{...}}, one per line, named and with fields named after the call-in or
 -- Spring function it comes from. All events come from call-ins, nothing is sampled. What does not change
--- during the game is written once, after the events: the game, the teams, each team's statistics history
+-- during the game is written once, after the events: the game, the sides, the teams, each team's statistics history
 -- (Spring.GetTeamStatsHistory, every 15 s) and the unit defs the events refer to. "end" is written when logging stops,
 -- also when the replay stalls;
 -- its reason is "gameover" only if the game ended. A file without it is incomplete: the engine crashed or was stopped.
@@ -46,6 +46,7 @@ local spGetFactoryCommandCount = Spring.GetFactoryCommandCount
 local spGetGaiaTeamID = Spring.GetGaiaTeamID
 local spGetGameFrame = Spring.GetGameFrame
 local spGetPlayerInfo = Spring.GetPlayerInfo
+local spGetSideData = Spring.GetSideData
 local spGetTeamInfo = Spring.GetTeamInfo
 local spGetTeamList = Spring.GetTeamList
 local spGetTeamRulesParam = Spring.GetTeamRulesParam
@@ -145,7 +146,7 @@ local function referenceUnitDef(unitDefID)
 end
 
 --------------------------------------------------------------------------------
--- Once per game: game, teams and unit defs
+-- Once per game: game, sides, teams and unit defs
 --------------------------------------------------------------------------------
 
 local function getGame()
@@ -159,6 +160,12 @@ local function getGame()
 	}
 end
 
+-- The sides (factions) of the game, as Spring.GetSideData returns them from the game's gamedata/sidedata.lua: name
+-- and start unit of each.
+local function getSides()
+	return spGetSideData()
+end
+
 local function getTeamName(teamID, leaderID, hasAI)
 	if hasAI then
 		local _, aiName, _, shortName = spGetAIInfo(teamID)
@@ -168,7 +175,7 @@ local function getTeamName(teamID, leaderID, hasAI)
 end
 
 -- Every team but Gaia, with what Spring.GetTeamInfo returns and the commander it started with: BAR's team rules param
--- "startUnit" (a unitDefID), which also tells the faction of a team whose side is "random".
+-- "startUnit" (a unitDefID), whose side in getSides is the faction the team played, also for a side "random".
 local function getTeams()
 	local teams = {}
 	for _, teamID in ipairs(spGetTeamList()) do
@@ -243,6 +250,8 @@ local function closeEventsFile(reason)
 	eventsFile:write(
 		'\n],"game":',
 		encodeJson(getGame()),
+		',"sides":',
+		encodeJson(getSides()),
 		',"teams":',
 		encodeJson(teams),
 		',"teamStats":',
