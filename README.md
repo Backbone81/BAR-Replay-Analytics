@@ -91,7 +91,7 @@ was stopped.
 | `unitDestroyed` | a unit dies | `unitID`, `unitDefID`, `unitTeam`, `x`, `z`, `buildProgress`, `attackerID`, `attackerDefID`, `attackerTeam`, `weaponDefID` (negative: `Game.envDamageTypes`, e.g. `SelfD`) |
 | `unitGiven` | a unit changes team | `unitID`, `unitDefID`, `newTeam`, `oldTeam` |
 | `unitIdle` | a commander's, constructor's or factory's queue ran empty, or it is finished or given without orders | `unitID`, `unitDefID`, `unitTeam` |
-| `unitCommand` | a commander, constructor or factory is given a command (also states, stop, remove: not every command enters the queue) | `unitID`, `unitDefID`, `unitTeam`, `cmdID` (a build is `-unitDefID`), `cmdParams`, `cmdOpts` (`CommandOptions.coded`), `playerID`, `fromSynced`, `fromLua` |
+| `unitCommand` | a commander, constructor or factory is given a command (also states, stop, remove: not every command enters the queue); written at the start of the next frame | `unitID`, `unitDefID`, `unitTeam`, `cmdID` (a build is `-unitDefID`), `cmdParams`, `cmdOpts` (`CommandOptions.coded`), `playerID`, `fromSynced`, `fromLua`, `commandCount` (the commands in the unit's queue then, a factory's build queue; 0: the command left an idle unit idle; missing if the unit is gone) |
 | `unitCmdDone` | a commander, constructor or factory finished a command | `unitID`, `unitDefID`, `unitTeam`, `cmdID`, `cmdParams`, `cmdOpts`, `cmdTag` (the command's tag in the queue) |
 | `teamDied` | a team died (resigned, left or wiped out); BAR then removes its units | `teamID` |
 | `gameOver` | the game ends | `winningAllyTeams` |

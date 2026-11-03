@@ -19,7 +19,9 @@ end
 --   {"events":[...],"game":{...},"sides":[...],"teams":[...],"teamStats":{"<teamID>":[...]},
 --    "unitDefs":{"<unitDefID>":{...}},"end":{"frame":...,"reason":...}}
 -- Each event is {"frame":...,"<event name>":{...}}, one per line, named and with fields named after the call-in or
--- Spring function it comes from. All events come from call-ins, nothing is sampled. What does not change
+-- Spring function it comes from. All events come from call-ins, nothing is sampled; only "unitCommand" is written at
+-- the start of the next frame, with the unit's queue length then (the engine queues a command after the call-in), see
+-- writePendingCommands. What does not change
 -- during the game is written once, after the events: the game, the sides, the teams, each team's statistics history
 -- (Spring.GetTeamStatsHistory, every 15 s) and the unit defs the events refer to. "end" is written when logging stops,
 -- also when the replay stalls;
@@ -75,6 +77,7 @@ local eventsFile -- nil while not logging
 local isFirstEvent = true
 local teamIDs = {} -- set of every team but Gaia
 local referencedUnitDefIDs = {} -- set of the unit defs the events refer to, written once at the end
+local pendingCommands = {} -- the "unitCommand" events not written yet, oldest first, see writePendingCommands
 
 local lastFrame = -1
 local lastFrameTimer -- when the frame last advanced; nil until Initialize
@@ -128,13 +131,49 @@ local function encodeJson(value)
 end
 
 -- Writes {"frame":...,"<name>":<fields>} into the events array.
-local function writeEvent(name, fields)
+local function writeEventAt(frame, name, fields)
 	if not eventsFile then
 		return
 	end
 	local separator = isFirstEvent and "" or ",\n"
 	isFirstEvent = false
-	eventsFile:write(separator, stringFormat('{"frame":%d,%s:%s}', spGetGameFrame(), encodeJson(name), encodeJson(fields)))
+	eventsFile:write(separator, stringFormat('{"frame":%d,%s:%s}', frame, encodeJson(name), encodeJson(fields)))
+end
+
+-- Writes the pending "unitCommand" events given before beforeFrame, or all with beforeFrame nil, with commandCount:
+-- the number of commands in the unit's queue now (a factory's: its build queue), left out if the unit is gone. The
+-- engine calls UnitCommand before it queues the command (CCommandAI::GiveCommand), so the queue holds it only after
+-- the call-in. They are written at the first event of a later frame, so the events stay in the order of their frames:
+-- in a frame, the game's synced gadgets run before this widget's GameFrame. A command which is no order (a state,
+-- stop, remove ...) leaves the queue of an idle unit empty.
+local function writePendingCommands(beforeFrame)
+	local count = 0
+	for _, pending in ipairs(pendingCommands) do
+		if beforeFrame and pending.frame >= beforeFrame then
+			break
+		end
+		count = count + 1
+		local fields = pending.fields
+		if pending.isFactory then
+			fields.commandCount = spGetFactoryCommandCount(fields.unitID)
+		else
+			fields.commandCount = spGetUnitCommandCount(fields.unitID)
+		end
+		writeEventAt(pending.frame, "unitCommand", fields)
+	end
+	for i = 1, #pendingCommands do
+		pendingCommands[i] = pendingCommands[i + count]
+	end
+end
+
+-- Writes {"frame":...,"<name>":<fields>} into the events array at the current frame, after the pending "unitCommand"
+-- events of earlier frames.
+local function writeEvent(name, fields)
+	local frame = spGetGameFrame()
+	if pendingCommands[1] and pendingCommands[1].frame < frame then
+		writePendingCommands(frame)
+	end
+	writeEventAt(frame, name, fields)
 end
 
 -- Notes that the events refer to a unit def, so it is written at the end. Returns the unitDefID.
@@ -247,6 +286,7 @@ local function closeEventsFile(reason)
 	if not eventsFile then
 		return
 	end
+	writePendingCommands()
 	local teams = getTeams()
 	eventsFile:write(
 		'\n],"game":',
@@ -383,6 +423,7 @@ function widget:Update()
 end
 
 function widget:GameFrame(frame)
+	writePendingCommands(frame)
 	-- The skip only works once the game runs; the server then sends the rest of the replay as fast as it can.
 	if not isSkipSent and frame >= 1 then
 		isSkipSent = true
@@ -448,17 +489,21 @@ end
 
 function widget:UnitCommand(unitID, unitDefID, unitTeam, cmdID, cmdParams, cmdOpts, _, playerID, fromSynced, fromLua)
 	if isCommandLogged(unitDefID) then
-		writeEvent("unitCommand", {
-			unitID = unitID,
-			unitDefID = unitDefID,
-			unitTeam = unitTeam,
-			cmdID = cmdID < 0 and -referenceUnitDef(-cmdID) or cmdID,
-			cmdParams = cmdParams,
-			cmdOpts = cmdOpts and cmdOpts.coded,
-			playerID = playerID,
-			fromSynced = fromSynced,
-			fromLua = fromLua,
-		})
+		pendingCommands[#pendingCommands + 1] = {
+			frame = spGetGameFrame(),
+			isFactory = isFactoryDef[unitDefID],
+			fields = {
+				unitID = unitID,
+				unitDefID = unitDefID,
+				unitTeam = unitTeam,
+				cmdID = cmdID < 0 and -referenceUnitDef(-cmdID) or cmdID,
+				cmdParams = cmdParams,
+				cmdOpts = cmdOpts and cmdOpts.coded,
+				playerID = playerID,
+				fromSynced = fromSynced,
+				fromLua = fromLua,
+			},
+		}
 	end
 end
 
@@ -481,6 +526,7 @@ function widget:TeamDied(teamID)
 end
 
 function widget:GameOver(winningAllyTeams)
+	writePendingCommands()
 	writeEvent("gameOver", { winningAllyTeams = winningAllyTeams })
 	quit("gameover")
 end
