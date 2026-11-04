@@ -141,9 +141,10 @@ local function writeEventAt(frame, name, fields)
 end
 
 -- Writes the pending "unitCommand" events given before beforeFrame, or all with beforeFrame nil, with commandCount:
--- the number of commands in the unit's queue now (a factory's: its build queue), left out if the unit is gone. The
--- engine calls UnitCommand before it queues the command (CCommandAI::GiveCommand), so the queue holds it only after
--- the call-in. They are written at the first event of a later frame, so the events stay in the order of their frames:
+-- the number of commands in the unit's queue now (a factory's: its build queue), 0 if the unit is gone. The engine
+-- calls UnitCommand before it queues the command (CCommandAI::GiveCommand), so the queue holds it only after the
+-- call-in. A unit is gone only if the command came after it died (the engine keeps a dying unit until its death
+-- animation ends, and a gadget may still give it states), so its "unitDestroyed" event comes first. They are written at the first event of a later frame, so the events stay in the order of their frames:
 -- in a frame, the game's synced gadgets run before this widget's GameFrame. A command which is no order (a state,
 -- stop, remove ...) leaves the queue of an idle unit empty.
 local function writePendingCommands(beforeFrame)
@@ -155,9 +156,9 @@ local function writePendingCommands(beforeFrame)
 		count = count + 1
 		local fields = pending.fields
 		if pending.isFactory then
-			fields.commandCount = spGetFactoryCommandCount(fields.unitID)
+			fields.commandCount = spGetFactoryCommandCount(fields.unitID) or 0
 		else
-			fields.commandCount = spGetUnitCommandCount(fields.unitID)
+			fields.commandCount = spGetUnitCommandCount(fields.unitID) or 0
 		end
 		writeEventAt(pending.frame, "unitCommand", fields)
 	end
